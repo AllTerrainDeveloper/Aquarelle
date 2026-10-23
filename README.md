@@ -34,9 +34,12 @@ tabs, then press **Paint** (it also pauses and resumes):
   moving in close for fine marks and pulling back for washes and while paint
   dries. Between colours, and whenever it runs dry, the brush goes to the
   jar to rinse (the water clouds with what is rinsed) and loads up in the
-  next well. The brush is drawn hair by hair: strands bend behind the motion
-  with a little spring, splay under pressure and as the brush dries, and
-  carry the paint in their lower part. Wet washes catch the light. *Record
+  next well. The brush's hairs are simulated (js/bristles.js): each is a short
+  chain that springs back to a round brush's shape, clings to the others
+  while wet, cannot pass through the paper, is held back by friction where
+  it touches and fans out when pressed. The hand only places and tilts the
+  ferrule, pressing harder until the touching hairs are as wide as the
+  paint, and steering them onto it. Wet washes catch the light. *Record
   video* records what the camera sees. Everything moves on springs or eased
   paths (the brush is carried through the air between all marks and comes
   down onto the paper), the brush's tip sits on the paint as it is laid, the brush grows slowly for broad washes (capped on screen), it lifts clear off the sheet and over gaps, the camera frames each flight with its destination, and

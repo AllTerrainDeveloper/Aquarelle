@@ -24,12 +24,17 @@
 
 import { brushPath, brushPose, drawBead, drawHandle } from './gesture-animator.js';
 import { mulberry32 } from './prng.js';
+import { Bristles } from './bristles.js';
 
 const smooth = ( a, b, x ) => {
 	const t = Math.min( 1, Math.max( 0, ( x - a ) / ( b - a ) ) );
 	return t * t * ( 3 - 2 * t );
 };
 const lerp = ( a, b, t ) => a + ( b - a ) * t;
+const norm3 = ( a ) => {
+	const l = Math.hypot( a.x, a.y, a.z ) || 1;
+	return { x: a.x / l, y: a.y / l, z: a.z / l };
+};
 const mixRgb = ( c, d, w ) => [ lerp( c[ 0 ], d[ 0 ], w ), lerp( c[ 1 ], d[ 1 ], w ), lerp( c[ 2 ], d[ 2 ], w ) ];
 const rgba = ( c, a ) => `rgba(${ c[ 0 ] | 0 },${ c[ 1 ] | 0 },${ c[ 2 ] | 0 },${ a })`;
 const hexRgb = ( h ) => {
@@ -39,7 +44,6 @@ const hexRgb = ( h ) => {
 
 const WATER = [ 214, 226, 232 ];
 const HAIR = [ 176, 132, 86 ];
-const STRANDS = 72;
 // A clean, wet brush: just the sable, a little darker for the water.
 const CLEAN = [ 120, 88, 56 ];
 // The longest the brush's hair may look on screen (CSS px), however close the camera.
@@ -80,7 +84,7 @@ export function deskLayout( aspect, pigments ) {
 	const cols = ks.length > 5 ? 2 : 1;
 	const rows = Math.max( 1, Math.ceil( ks.length / cols ) );
 	const jarR = 0.075;
-	const sp = Math.min( 0.085, Math.max( 0.3, Hn - 2 * jarR - 0.1 ) / rows );
+	const sp = Math.min( 0.11, Math.max( 0.36, Hn - 2 * jarR - 0.1 ) / rows );
 	const pad = 0.022;
 	const trayW = cols * sp + 2 * pad;
 	const trayH = rows * sp + 2 * pad;
@@ -92,7 +96,7 @@ export function deskLayout( aspect, pigments ) {
 	const tray = { x: x0 + ( sideW - trayW ) / 2, y: top + 2 * jarR + 0.05, w: trayW, h: trayH };
 	const wells = {};
 	ks.forEach( ( k, j ) => {
-		wells[ k ] = { x: tray.x + pad + ( ( j % cols ) + 0.5 ) * sp, y: tray.y + pad + ( Math.floor( j / cols ) + 0.5 ) * sp, r: sp * 0.4 };
+		wells[ k ] = { x: tray.x + pad + ( ( j % cols ) + 0.5 ) * sp, y: tray.y + pad + ( Math.floor( j / cols ) + 0.5 ) * sp, r: sp * 0.45 };
 	} );
 	const m = 0.05;
 	return {
@@ -143,14 +147,8 @@ export class Director {
 		this.active = false;
 		this.desk = null;
 		this.scss = 1;
-		const rnd = mulberry32( 11 );
-		// Each hair: where it sits across the bundle (−1 lit side, 1 shadowed),
-		// its length, a little irregularity, and the tuft it joins when dry.
-		const tufts = Array.from( { length: 6 }, () => rnd() * 2 - 1 );
-		this.hairs = Array.from( { length: STRANDS }, ( _, i ) => {
-			const s = ( ( i + 0.5 ) / STRANDS ) * 2 - 1 + ( rnd() - 0.5 ) * 0.05;
-			return { s, len: 0.84 + 0.16 * rnd(), n: rnd() * 2 - 1, clump: tufts[ Math.min( 5, Math.floor( ( s + 1 ) * 3 ) ) ] };
-		} );
+		// The brush's hairs, simulated.
+		this.br = new Bristles( 36 );
 		this.reset();
 	}
 
@@ -158,7 +156,12 @@ export class Director {
 		this.cam = null;
 		this.hand = null;
 		this.raw = null;
-		this.bend = { x: 0, y: 0, vx: 0, vy: 0 };
+		this.depth = 0;
+		this.corr = { x: 0, y: 0 };
+		this.lean = { x: 0, y: 0 };
+		if ( this.br ) {
+			this.br.ready = false;
+		}
 		this.color = CLEAN.slice();
 		this.load = 0;
 		this.water = WATER.slice();
@@ -238,8 +241,9 @@ export class Director {
 					const ink = a.blob && a.blob.path ? inkAt( a.blob.path, p.p ) : a.tip * 0.6;
 					// Coming down and lifting off ease in and out.
 					// Off the sheet, or where the stroke lays nothing, the brush is lifted clear.
-					const off = p.x < 0 || p.y < 0 || p.x > this.W || p.y > this.H;
-					const lift = Math.max( smooth( 0, 1, p.lift ), off ? 1 : ink > 0 ? 0 : 0.7 );
+					// (gradually, over a few cells past the edge)
+					const out = Math.max( 0, -p.x, -p.y, p.x - this.W, p.y - this.H );
+					const lift = Math.max( smooth( 0, 1, p.lift ), smooth( 0, 4, out ), ink > 0 ? 0 : 0.7 );
 					// Lifted, the hand never wanders off over the desk: it waits at the sheet's edge.
 					p.x = Math.min( this.W, Math.max( 0, p.x ) );
 					p.y = Math.min( this.H, Math.max( 0, p.y ) );
@@ -340,7 +344,7 @@ export class Director {
 			}
 		}
 		// On the paper the tip must sit on the paint at once.
-		const melt = Math.exp( -dt / ( T.lift < 0.05 ? 0.03 : 0.2 ) );
+		const melt = Math.exp( -dt / ( T.stroke && T.lift < 0.05 ? 0.12 : 0.25 ) );
 		off.x *= melt;
 		off.y *= melt;
 		off.lift *= melt;
@@ -350,7 +354,7 @@ export class Director {
 		h.x = T.x + off.x;
 		h.y = T.y + off.y;
 		const lift = Math.max( 0, T.lift + off.lift );
-		h.lift = undefined === h.lift ? lift : h.lift + ( lift - h.lift ) * ( 1 - Math.exp( -dt / 0.08 ) );
+		h.lift = undefined === h.lift ? lift : h.lift + ( lift - h.lift ) * ( 1 - Math.exp( -dt / 0.14 ) );
 		const pc = this.pc;
 		const vx = ( ( h.x - px ) * pc ) / Math.max( dt, 1e-3 );
 		const vy = ( ( h.y - py ) * pc ) / Math.max( dt, 1e-3 );
@@ -419,25 +423,6 @@ export class Director {
 			}
 		}
 		this.ripples = this.ripples.filter( ( r ) => this.time - r.t < 1.2 );
-
-		// Strands: a lightly damped spring dragged behind the motion, which
-		// flicks as the brush changes direction or lifts off.
-		const b = this.bend;
-		const B = this.brushDims();
-		const contact = 1 - smooth( 0, 0.35, h.lift );
-		const drag = Math.min( 1, h.speed / 260 ) * B.ferW * ( 0.5 + 1.3 * h.press ) * ( 0.25 + 0.75 * contact );
-		const tx = -h.dirX * drag;
-		const ty = -h.dirY * drag;
-		const w = 26;
-		const z = 0.38;
-		const steps = Math.max( 1, Math.ceil( dt / 0.008 ) );
-		const st = dt / steps;
-		for ( let i = 0; i < steps; i++ ) {
-			b.vx += ( w * w * ( tx - b.x ) - 2 * z * w * b.vx ) * st;
-			b.vy += ( w * w * ( ty - b.y ) - 2 * z * w * b.vy ) * st;
-			b.x += b.vx * st;
-			b.y += b.vy * st;
-		}
 	}
 
 	_dipId( t ) {
@@ -593,6 +578,7 @@ export class Director {
 		}
 		dt = Math.min( 0.1, Math.max( 0, dt ) );
 		this.time += dt;
+		this.lastDt = dt;
 		this._moveHand( dt, t );
 		this._moveCamera( dt, t );
 		const ctx = this.ctx;
@@ -726,248 +712,264 @@ export class Director {
 	}
 
 	/**
-	 * The brush, hair by hair: a round sable bundle that swells from the
-	 * ferrule into a belly and draws to a point, lit from the upper left so
-	 * it reads as round. The hairs bend progressively toward the tip behind
-	 * the motion, spread as the brush presses, part into tufts as it dries,
-	 * and carry the paint in their lower part. Above them a lacquered handle
-	 * that leans with the motion and trembles a little.
-	 *
-	 * Its shadow is cast from the upper left onto the paper: sharp and close
-	 * where the tip touches, softer and further off the higher the brush is,
-	 * so the handle's shadow falls well away from it.
+	 * The brush: its hairs are simulated (see Bristles), the hand only places
+	 * and tilts the ferrule. Two small controls keep the result honest: the
+	 * part of the bundle touching the paper is steered onto the paint being
+	 * laid, and the brush is pressed down (or eased off) until that part is
+	 * as wide as the paint. Then the bundle, its handle and its shadow are
+	 * drawn from the simulated hairs.
 	 */
 	_drawBrush( ctx, scale ) {
 		const h = this.hand;
+		const dt = Math.min( 0.05, this.lastDt || 1 / 60 );
 		const { hairL, ferW, ferL, handleL, ink } = this.brushDims();
 		const pc = this.pc;
 		const lift = Math.max( 0, h.lift );
-		const contact = 1 - smooth( 0, 0.3, lift );
-		// A wide ribbon of paint means pressing harder: 0 for a mark the tip
-		// covers, 1 for one twice the brush's width.
-		const wide = contact * smooth( 0.6, 2.2, ink / Math.max( 1e-3, ferW ) );
-		const press = Math.max( h.press * contact, wide );
+		const touching = 1 - smooth( 0, 0.3, lift );
 		// The handle leans up and to the right, pulled along the motion; a
 		// living hand is never quite still.
-		const tremor = Math.sin( this.time * 5.3 ) * 0.008 + Math.sin( this.time * 2.1 + 1 ) * 0.012;
-		let hx = 0.6 + h.dirX * 0.25 + tremor;
-		let hy = -0.8 + h.dirY * 0.25 + tremor * 0.6;
-		const hl = Math.hypot( hx, hy );
+		const tremor = Math.sin( this.time * 3.1 ) * 0.004 + Math.sin( this.time * 1.7 + 1 ) * 0.006;
+		// The lean comes with real speed only, and changes slowly, so the brush
+		// never swings about on a curved flight.
+		const pull = Math.min( 1, h.speed / 250 );
+		const lf = 1 - Math.exp( -dt / 0.35 );
+		this.lean.x += ( ( h.dirX || 0 ) * pull - this.lean.x ) * lf;
+		this.lean.y += ( ( h.dirY || 0 ) * pull - this.lean.y ) * lf;
+		const A = norm3( { x: 0.42 + this.lean.x * 0.2 + tremor, y: 0.12 + this.lean.y * 0.2 + tremor * 0.5, z: 0.86 } );
+		const down = { x: -A.x, y: -A.y, z: -A.z };
+		const br = this.br;
+		const c = br.contact;
+		// Pressure: lower the ferrule until the touching hairs are as wide as
+		// the paint (a light touch where there is no paint to match).
+		const want = ink > 0 ? ink : ferW * 0.3;
+		if ( touching > 0.5 && c.n ) {
+			this.depth += Math.max( -ferW, Math.min( ferW, want - c.width ) ) * dt * 5;
+		}
+		this.depth = Math.min( hairL * 0.55, Math.max( hairL * 0.06, this.depth || hairL * 0.12 ) );
+		// Steering: the touching part of the bundle sits on the paint.
+		const P = { x: h.x * pc, y: h.y * pc };
+		if ( touching > 0.5 && c.n ) {
+			const g = Math.min( 1, dt * 22 );
+			this.corr.x += ( P.x - c.x ) * g;
+			this.corr.y += ( P.y - c.y ) * g;
+			const cl = Math.hypot( this.corr.x, this.corr.y );
+			if ( cl > hairL ) {
+				this.corr.x *= hairL / cl;
+				this.corr.y *= hairL / cl;
+			}
+		} else {
+			const melt = Math.exp( -dt / 0.25 );
+			this.corr.x *= melt;
+			this.corr.y *= melt;
+		}
+		const height = Math.min( 2, lift ) * hairL * 0.9;
+		const F = {
+			x: P.x - down.x * hairL + this.corr.x,
+			y: P.y - down.y * hairL + this.corr.y,
+			z: -down.z * hairL - this.depth * touching + height,
+		};
+		br.step( dt, { F, down, hairL, fw: ferW * 0.47, belly: ferW * 0.5 * ( 0.5 + 0.35 * this.load ), wet: 0.25 + 0.75 * this.load, dry: 1 - this.load, dirX: h.dirX || 0, dirY: h.dirY || 0 } );
+
+		// Seen from above and in front: height lifts a point up the screen.
+		const proj = ( x, y, z ) => [ x, y - z ];
+		const E3 = { x: F.x + A.x * ferL, y: F.y + A.y * ferL, z: F.z + A.z * ferL };
+		const End3 = { x: E3.x + A.x * handleL, y: E3.y + A.y * handleL, z: E3.z + A.z * handleL };
+		const [ fx, fy ] = proj( F.x, F.y, F.z );
+		const [ ex, ey ] = proj( E3.x, E3.y, E3.z );
+		const [ nx, ny ] = proj( End3.x, End3.y, End3.z );
+		let hx = ex - fx;
+		let hy = ey - fy;
+		const hl = Math.hypot( hx, hy ) || 1;
 		hx /= hl;
 		hy /= hl;
-		const px = -hy;
-		const py = hx;
-		// Height of the tip above the paper: none while it paints.
-		const height = Math.min( 2, lift ) * hairL * 0.9;
-		const touch = 1 - smooth( 0, 0.25, lift );
-		const b = this.bend;
-		// On the paper the tip stays exactly where the paint goes down and the
-		// ferrule leads, the hairs trailing; in the air the tip flicks freely.
-		const P = { x: h.x * pc, y: h.y * pc - height };
-		// Pressed down, the bundle bends over and looks shorter.
-		const squash = 1 - 0.22 * press - 0.15 * wide;
-		const F = { x: P.x + hx * hairL * squash - b.x * touch, y: P.y + hy * hairL * squash - b.y * touch };
-		const E = { x: F.x + hx * ferL, y: F.y + hy * ferL };
-		const End = { x: E.x + hx * handleL, y: E.y + hy * handleL };
-		const dry = 1 - this.load;
-		const fw0 = ferW * 0.47;
-		const bulge = ferW * 0.5 * ( 0.5 + 0.35 * this.load + 0.45 * press + 0.6 * wide );
-		// The tip spreads to the width of the paint it lays, as far as a real
-		// tip can (about the brush's own width).
-		// Up to what a round brush pressed flat can reach (about 2.3x its width).
-		const splay = touch * Math.min( ink, ferW * 2.3 ) * ( 0.6 + 0.4 * press ) + ( 1 - touch ) * ferW * 0.06 * ( 1 + dry );
-		// Pressed flat, the hairs fan out from further up the bundle.
-		const fan = 3 - 1.6 * wide;
-		// Along the bundle (t: 0 at the ferrule, 1 at the tip): centre line,
-		// bent more toward the tip in the air, and half-width.
-		const free = 1 - touch;
-		const cx = ( t ) => F.x + ( P.x - F.x ) * t + b.x * t * t * free;
-		const cy = ( t ) => F.y + ( P.y - F.y ) * t + b.y * t * t * free;
-		const half = ( t ) => fw0 * ( 1 - t ) + bulge * Math.sin( Math.PI * t ) * ( 1 - 0.35 * t ) + splay * Math.pow( t, fan );
-		// Sideways: across the handle near the ferrule, across the stroke at
-		// the tip while it paints (so the spread matches the ribbon of paint).
-		const mx = -( h.dirY || 0 );
-		const my = h.dirX || 0;
-		const sgn = mx * px + my * py < 0 ? -1 : 1;
-		const lat = ( t ) => {
-			const u = t * t * touch;
-			const x = px + ( sgn * mx - px ) * u;
-			const y = py + ( sgn * my - py ) * u;
-			const n = Math.hypot( x, y ) || 1;
-			return [ x / n, y / n ];
-		};
+		const S = br.segs;
+		const H = br.hairs.length;
 
-		this._drawShadow( ctx, scale, { P, hx, hy, height, hairL, ferL, handleL, ferW, bulge } );
+		this._drawShadow( ctx, scale, { F, E3, End3, ferW, hairL } );
 
 		ctx.save();
-		drawHandle( ctx, F, E, End, hx, hy, ferW, handleL, 1 );
 
-		// The bundle's body, so the hairs read as a dense brush.
+		// Each hair as a smooth curve through its simulated points, split where
+		// the paint begins; lit from the upper left, so hairs on that side of
+		// the bundle are lighter.
 		const paint = this.color;
-		const paintAt = 0.42 + 0.2 * dry;
-		const T = 14;
-		ctx.beginPath();
-		for ( let i = 0; i <= T; i++ ) {
-			const t = i / T;
-			const w = half( t );
-			const [ lx, ly ] = lat( t );
-			ctx[ i ? 'lineTo' : 'moveTo' ]( cx( t ) + lx * w, cy( t ) + ly * w );
-		}
-		for ( let i = T; i >= 0; i-- ) {
-			const t = i / T;
-			const w = half( t );
-			const [ lx, ly ] = lat( t );
-			ctx.lineTo( cx( t ) - lx * w, cy( t ) - ly * w );
-		}
-		ctx.closePath();
-		const body = ctx.createLinearGradient( F.x, F.y, cx( 1 ), cy( 1 ) );
-		body.addColorStop( 0, rgba( mixRgb( HAIR, [ 0, 0, 0 ], 0.35 ), 1 ) );
-		body.addColorStop( Math.max( 0, paintAt - 0.1 ), rgba( mixRgb( HAIR, [ 0, 0, 0 ], 0.45 ), 1 ) );
-		body.addColorStop( Math.min( 1, paintAt + 0.06 ), rgba( mixRgb( paint, [ 0, 0, 0 ], 0.3 ), 1 ) );
-		body.addColorStop( 1, rgba( mixRgb( paint, [ 0, 0, 0 ], 0.45 ), 1 ) );
-		ctx.fillStyle = body;
-		ctx.fill();
-
-		// The hairs, in four bands of light (shadowed side first), each split
-		// where the paint begins.
-		const up = [ [], [], [], [] ];
-		const down = [ [], [], [], [] ];
-		const N = 8;
-		for ( const hr of this.hairs ) {
-			const band = Math.min( 3, Math.max( 0, Math.floor( ( 1 - ( hr.s + hr.n * 0.15 ) ) * 2 ) ) );
-			const tuft = hr.clump * dry * ferW * 0.4;
-			const cut = paintAt + hr.n * 0.05;
+		const paintAt = 0.42 + 0.2 * ( 1 - this.load );
+		const lines = [];
+		for ( let i = 0; i < H; i++ ) {
+			const d = br.hairs[ i ].dir;
+			const sx = d.x;
+			const sy = d.y - d.z;
+			const sl = Math.hypot( sx, sy ) || 1;
+			const lit = ( -0.6 * sx - 0.75 * sy ) / sl;
 			const pts = [];
-			for ( let i = 0; i <= N; i++ ) {
-				const t = ( i / N ) * hr.len;
-				const w = half( t ) * hr.s + ( tuft + hr.n * ferW * 0.05 ) * t * t;
-				const [ lx, ly ] = lat( t );
-				pts.push( [ cx( t ) + lx * w, cy( t ) + ly * w, t ] );
+			for ( let j = 0; j <= S; j++ ) {
+				const [ x, y, z ] = br.at( i, j );
+				pts.push( proj( x, y, z ) );
 			}
-			const a = [];
-			const z = [];
-			for ( let i = 0; i <= N; i++ ) {
-				( pts[ i ][ 2 ] <= cut ? a : z ).push( pts[ i ] );
-			}
-			if ( a.length && z.length ) {
-				z.unshift( a[ a.length - 1 ] );
-			}
-			up[ band ].push( a );
-			down[ band ].push( z );
+			lines.push( { pts, lit, cut: Math.max( 1, Math.min( S - 1, Math.round( ( paintAt + br.hairs[ i ].n * 0.05 ) * S ) ) ) } );
 		}
-		const lw = Math.max( 0.3, ( ferW * 2.6 ) / this.hairs.length );
-		const hairShade = [ [ [ 255, 236, 200 ], 0.35 ], [ HAIR, 0 ], [ [ 0, 0, 0 ], 0.25 ], [ [ 0, 0, 0 ], 0.5 ] ];
-		const paintShade = [ [ [ 255, 255, 255 ], 0.3 ], [ paint, 0 ], [ [ 0, 0, 0 ], 0.2 ], [ [ 0, 0, 0 ], 0.4 ] ];
+		// Far hairs first: the viewer looks from the front and above, so a
+		// point is nearer the more it is toward +y and up.
+		const depthOf = ( i ) => {
+			let dsum = 0;
+			for ( let j = 1; j <= S; j++ ) {
+				const [ , y, z ] = br.at( i, j );
+				dsum += y + z;
+			}
+			return dsum;
+		};
+		lines.forEach( ( l, i ) => ( l.depth = depthOf( i ) ) );
+		lines.sort( ( a, b ) => a.depth - b.depth );
+		const curve = ( pts, j0, j1 ) => {
+			ctx.moveTo( pts[ j0 ][ 0 ], pts[ j0 ][ 1 ] );
+			for ( let j = j0 + 1; j < j1; j++ ) {
+				ctx.quadraticCurveTo( pts[ j ][ 0 ], pts[ j ][ 1 ], ( pts[ j ][ 0 ] + pts[ j + 1 ][ 0 ] ) / 2, ( pts[ j ][ 1 ] + pts[ j + 1 ][ 1 ] ) / 2 );
+			}
+			ctx.lineTo( pts[ j1 ][ 0 ], pts[ j1 ][ 1 ] );
+		};
 		ctx.lineCap = 'round';
 		ctx.lineJoin = 'round';
-		ctx.lineWidth = lw;
-		const stroke = ( lines ) => {
+		// Lit from the upper left: a hair's shade from its side of the bundle.
+		const tone = ( c0, lit ) => ( lit > 0 ? mixRgb( c0, [ 255, 240, 215 ], lit * 0.35 ) : mixRgb( c0, [ 0, 0, 0 ], -lit * 0.4 ) );
+		const thin = Math.max( 0.35, ferW * 0.09 );
+		for ( const l of lines ) {
+			// Each hair over a darker body, so the bundle reads dense.
+			ctx.lineWidth = ferW * 0.38;
+			ctx.strokeStyle = rgba( mixRgb( HAIR, [ 0, 0, 0 ], 0.45 ), 0.45 );
 			ctx.beginPath();
-			for ( const l of lines ) {
-				for ( let i = 0; i < l.length; i++ ) {
-					ctx[ i ? 'lineTo' : 'moveTo' ]( l[ i ][ 0 ], l[ i ][ 1 ] );
-				}
-			}
+			curve( l.pts, 0, l.cut );
 			ctx.stroke();
-		};
-		for ( let k = 3; k >= 0; k-- ) {
-			ctx.strokeStyle = rgba( mixRgb( HAIR, hairShade[ k ][ 0 ], hairShade[ k ][ 1 ] ), 0.85 );
-			stroke( up[ k ] );
-			ctx.strokeStyle = rgba( mixRgb( paint, paintShade[ k ][ 0 ], paintShade[ k ][ 1 ] ), 0.8 );
-			stroke( down[ k ] );
+			ctx.strokeStyle = rgba( mixRgb( paint, [ 0, 0, 0 ], 0.35 ), 0.5 );
+			ctx.beginPath();
+			curve( l.pts, l.cut, S );
+			ctx.stroke();
+			ctx.lineWidth = thin;
+			ctx.strokeStyle = rgba( tone( HAIR, l.lit ), 0.9 );
+			ctx.beginPath();
+			curve( l.pts, 0, l.cut );
+			ctx.stroke();
+			ctx.strokeStyle = rgba( tone( paint, l.lit ), 0.85 );
+			ctx.beginPath();
+			curve( l.pts, l.cut, S );
+			ctx.stroke();
 		}
+		lines.sort( ( a, b ) => a.lit - b.lit );
+		// Wet glints on the most lit hairs.
+		ctx.strokeStyle = `rgba(255,255,255,${ 0.12 + 0.3 * this.load })`;
+		ctx.lineWidth = Math.max( 0.4, ferW * 0.1 );
+		ctx.beginPath();
+		for ( const l of lines.slice( -4 ) ) {
+			curve( l.pts, 1, S - 1 );
+		}
+		ctx.stroke();
 
-		// Wet sheen on the lit side: a soft broad glow and a fine glint.
-		const sheen = 0.1 + 0.3 * this.load;
-		const along = ( s, t0, t1 ) => {
-			ctx.beginPath();
-			for ( let i = 0; i <= 10; i++ ) {
-				const t = t0 + ( ( t1 - t0 ) * i ) / 10;
-				const w = half( t ) * s;
-				const [ lx, ly ] = lat( t );
-				ctx[ i ? 'lineTo' : 'moveTo' ]( cx( t ) + lx * w, cy( t ) + ly * w );
-			}
-			ctx.stroke();
-		};
-		ctx.strokeStyle = `rgba(255,255,255,${ sheen * 0.45 })`;
-		ctx.lineWidth = ferW * 0.35;
-		along( -0.45, 0.12, 0.8 );
-		ctx.strokeStyle = `rgba(255,255,255,${ sheen * 1.6 })`;
-		ctx.lineWidth = Math.max( 0.4, lw * 1.4 );
-		along( -0.55, 0.2, 0.75 );
+		// The ferrule and handle stand nearer the viewer than the hair roots
+		// they hold, so they are drawn over them.
+		drawHandle( ctx, { x: fx, y: fy }, { x: ex, y: ey }, { x: nx, y: ny }, hx, hy, ferW, Math.hypot( nx - ex, ny - ey ), 1 );
 
+		// The tip: where the hairs meet.
+		let tx = 0;
+		let ty = 0;
+		for ( const l of lines ) {
+			tx += l.pts[ S ][ 0 ] / H;
+			ty += l.pts[ S ][ 1 ] / H;
+		}
 		// A freshly loaded brush in the air holds a bead at its tip; in the
 		// jar the water rings around it.
 		if ( this.load > 0.8 && lift > 0.3 && ! h.dip ) {
 			const r = ferW * 0.32;
-			drawBead( ctx, cx( 1 ), cy( 1 ) + r * 0.4, r, r * 1.12, 0, paint, smooth( 0.3, 0.6, lift ) * 0.85 );
+			drawBead( ctx, tx, ty + r * 0.4, r, r * 1.12, 0, paint, smooth( 0.3, 0.6, lift ) * 0.85 );
 		}
 		if ( h.dip && 'rinse' === h.seg ) {
 			ctx.strokeStyle = 'rgba(255,255,255,0.5)';
 			ctx.lineWidth = 0.8;
 			ctx.beginPath();
-			ctx.ellipse( cx( 1 ), cy( 1 ), bulge * 1.6, bulge * 1.1, 0, 0, Math.PI * 2 );
+			ctx.ellipse( tx, ty, ferW * 0.9, ferW * 0.6, 0, 0, Math.PI * 2 );
 			ctx.stroke();
 		}
 		ctx.restore();
 	}
 
 	/**
-	 * The brush's shadow. A point d along the brush from the tip stands
-	 * about `height + 0.55 d` above the paper; its shadow falls that far
-	 * toward the lower right. Near the paper it is sharp and dark, high up
-	 * it is wide, soft and faint. Drawn with the canvas shadow (its blur
-	 * stays soft at any zoom): the shape itself is placed far off the canvas
-	 * and only its shadow is moved back into view.
+	 * The brush's shadow, cast from the upper left onto the paper: each point
+	 * falls toward the lower right by its height, so the touching hairs'
+	 * shadow is sharp and close and the handle's is long, soft and faint.
+	 * Drawn with the canvas shadow (its blur stays soft at any zoom): the
+	 * shape itself is placed far off the canvas and only its shadow is moved
+	 * back into view.
 	 */
-	_drawShadow( ctx, scale, { P, hx, hy, height, hairL, ferL, handleL, ferW, bulge } ) {
-		const lx = 0.55;
-		const ly = 0.75;
-		const at = ( d ) => {
-			const z = height + d * 0.55;
-			return { x: P.x + hx * d * 0.7 + lx * z * 0.8, y: P.y + height + hy * d * 0.7 + ly * z * 0.8, z };
-		};
+	_drawShadow( ctx, scale, { F, E3, End3, ferW, hairL } ) {
+		const fall = ( x, y, z ) => [ x + 0.45 * z, y + 0.6 * z ];
 		const K = 20000;
-		const part = ( ds, ws, blur, alpha ) => {
-			const pts = ds.map( at );
-			ctx.save();
-			ctx.shadowColor = `rgba(40,28,16,${ alpha })`;
-			ctx.shadowBlur = blur * scale;
-			ctx.shadowOffsetX = K * scale;
-			ctx.fillStyle = '#000';
-			ctx.beginPath();
-			pts.forEach( ( p, i ) => {
-				const nx = -( pts[ Math.min( i + 1, pts.length - 1 ) ].y - pts[ Math.max( i - 1, 0 ) ].y );
-				const ny = pts[ Math.min( i + 1, pts.length - 1 ) ].x - pts[ Math.max( i - 1, 0 ) ].x;
-				const n = Math.hypot( nx, ny ) || 1;
-				const w = ws[ i ];
-				ctx[ i ? 'lineTo' : 'moveTo' ]( p.x - K + ( nx / n ) * w, p.y + ( ny / n ) * w );
-			} );
-			for ( let i = pts.length - 1; i >= 0; i-- ) {
-				const p = pts[ i ];
-				const nx = -( pts[ Math.min( i + 1, pts.length - 1 ) ].y - pts[ Math.max( i - 1, 0 ) ].y );
-				const ny = pts[ Math.min( i + 1, pts.length - 1 ) ].x - pts[ Math.max( i - 1, 0 ) ].x;
-				const n = Math.hypot( nx, ny ) || 1;
-				ctx.lineTo( p.x - K - ( nx / n ) * ws[ i ], p.y - ( ny / n ) * ws[ i ] );
-			}
-			ctx.closePath();
-			ctx.fill();
-			ctx.restore();
+		const br = this.br;
+		const S = br.segs;
+		// All parts go into one layer as solid shapes, then that layer is laid
+		// down once: where parts overlap the shadow is no darker.
+		const cv = ctx.canvas;
+		if ( ! this.shade || this.shade.width !== cv.width || this.shade.height !== cv.height ) {
+			this.shade = document.createElement( 'canvas' );
+			this.shade.width = cv.width;
+			this.shade.height = cv.height;
+		}
+		const g = this.shade.getContext( '2d' );
+		g.setTransform( 1, 0, 0, 1, 0, 0 );
+		g.clearRect( 0, 0, cv.width, cv.height );
+		g.setTransform( ctx.getTransform() );
+		g.shadowOffsetX = K * scale;
+		g.lineCap = 'round';
+		g.lineJoin = 'round';
+		g.strokeStyle = '#000';
+		g.fillStyle = '#000';
+		// Ferrule and handle: higher, so softer and fainter, tapering away.
+		const pts = [ F, E3, { x: lerp( E3.x, End3.x, 0.3 ), y: lerp( E3.y, End3.y, 0.3 ), z: lerp( E3.z, End3.z, 0.3 ) }, End3 ].map( ( p ) => fall( p.x, p.y, p.z ) );
+		const widths = [ ferW * 0.45, ferW * 0.45, ferW * 0.55, ferW * 0.25 ];
+		g.shadowColor = 'rgba(40,28,16,0.5)';
+		g.shadowBlur = ( 6 + hairL * 0.15 ) * scale;
+		g.beginPath();
+		const side = ( k, sgn ) => {
+			const a0 = pts[ Math.max( 0, k - 1 ) ];
+			const a1 = pts[ Math.min( pts.length - 1, k + 1 ) ];
+			const nx = -( a1[ 1 ] - a0[ 1 ] );
+			const ny = a1[ 0 ] - a0[ 0 ];
+			const n = Math.hypot( nx, ny ) || 1;
+			return [ pts[ k ][ 0 ] - K + ( sgn * nx * widths[ k ] ) / n, pts[ k ][ 1 ] + ( sgn * ny * widths[ k ] ) / n ];
 		};
-		const top = hairL + ferL + handleL;
-		// Hair and ferrule: close to the paper.
-		part( [ 0, hairL * 0.4, hairL, hairL + ferL ], [ 0.3, bulge * 0.9, ferW * 0.42, ferW * 0.42 ], 2.5 + height * 0.35, 0.26 - 0.12 * smooth( 0, ferW * 4, height ) );
-		// Handle: higher, so softer and fainter, fading out toward its end.
-		part( [ hairL + ferL * 0.8, hairL + ferL + handleL * 0.3, top ], [ ferW * 0.42, ferW * 0.5, ferW * 0.2 ], 9 + height * 0.3, 0.11 );
-		// Where the tip touches the wet paper it darkens it a little.
-		const touch = 1 - smooth( 0, ferW, height );
-		if ( touch > 0 ) {
-			const g = ctx.createRadialGradient( P.x, P.y + height, 0, P.x, P.y + height, bulge * 1.4 );
-			g.addColorStop( 0, `rgba(30,22,14,${ 0.18 * touch })` );
+		for ( let k = 0; k < pts.length; k++ ) {
+			g[ k ? 'lineTo' : 'moveTo' ]( ...side( k, 1 ) );
+		}
+		for ( let k = pts.length - 1; k >= 0; k-- ) {
+			g.lineTo( ...side( k, -1 ) );
+		}
+		g.closePath();
+		g.fill();
+		// Hairs: near the paper, sharp and dark.
+		g.shadowColor = 'rgba(40,28,16,1)';
+		g.shadowBlur = ( 1.5 + F.z * 0.04 ) * scale;
+		g.lineWidth = ferW * 0.35;
+		g.beginPath();
+		for ( let i = 0; i < br.hairs.length; i += 2 ) {
+			for ( let j = 0; j <= S; j++ ) {
+				const [ x, y, z ] = br.at( i, j );
+				const [ sx, sy ] = fall( x, y, z );
+				g[ j ? 'lineTo' : 'moveTo' ]( sx - K, sy );
+			}
+		}
+		g.stroke();
+		ctx.save();
+		ctx.setTransform( 1, 0, 0, 1, 0, 0 );
+		ctx.globalAlpha = 0.28;
+		ctx.drawImage( this.shade, 0, 0 );
+		ctx.restore();
+		// Where the hairs press on the wet paper it darkens a little.
+		const c = br.contact;
+		if ( c.n ) {
+			const r = Math.max( ferW, c.width * 1.3 );
+			const g = ctx.createRadialGradient( c.x, c.y, 0, c.x, c.y, r );
+			g.addColorStop( 0, 'rgba(30,22,14,0.14)' );
 			g.addColorStop( 1, 'rgba(30,22,14,0)' );
 			ctx.fillStyle = g;
 			ctx.beginPath();
-			ctx.arc( P.x, P.y + height, bulge * 1.4, 0, Math.PI * 2 );
+			ctx.arc( c.x, c.y, r, 0, Math.PI * 2 );
 			ctx.fill();
 		}
 	}

@@ -423,6 +423,14 @@ export class GestureAnimator {
 									nextTrip.segs[ 0 ].from = trip.segs[ 0 ].from;
 								}
 							}
+							// ...but never into the past: nothing may start already under way.
+							let soonest = Infinity;
+							for ( const b of this.actions ) {
+								if ( ( 'brush' === b.tool || 'dip' === b.tool ) && ! b.hidden && b.start > a.start ) {
+									soonest = Math.min( soonest, b.start - ( b.approach || 0 ) );
+								}
+							}
+							saved = Math.max( 0, Math.min( saved, soonest - t ) );
 							for ( const b of this.actions ) {
 								if ( ( 'brush' === b.tool || 'dip' === b.tool ) && b.start > a.start ) {
 									b.start -= saved;
