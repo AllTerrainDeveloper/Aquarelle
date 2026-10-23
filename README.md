@@ -60,6 +60,19 @@ animated hand; `?bench=1&benchSpeed=16&benchRt=20` runs the benchmark
    areas. The pigment-mass rule above caps every stamp at the remaining
    need, so pigment overshoot only comes from flow; dark mistakes are
    corrected by lifting.
+3b. **Nothing is ever trimmed to the image.** A drop is one tone with its
+   own ragged outline; a brush stroke paints exactly the ribbon its tip
+   sweeps. Fidelity comes from *planning*, as a painter's does:
+   - **Coverage planner:** each colour's area (where that pigment belongs)
+     is filled by packing gestures largest-first at the deepest uncovered
+     point, each sized so its whole footprint fits (plus a small seam so
+     neighbouring washes meet). Big drops land in open interiors, brush
+     washes near borders, in three glazes (coarse → fine).
+   - **The tip stays in its colour:** brush paths only touch paper where
+     their colour belongs; a touch too short to be a stroke is skipped.
+   - **Step-back passes** (55%, 80%, 93%): the painter compares the canvas
+     with the target and paints the gaps that are still bare with fine
+     strokes sized and oriented to each gap, colour by colour, nearest first.
 4. **Gestures in time.** Nothing is stamped instantly. Big masses arrive
    as heavy drops: the drop falls with a converging shadow, flattens on
    impact, and blooms radially into the shape of its region while a crown

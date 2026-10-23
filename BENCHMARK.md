@@ -35,7 +35,9 @@ still to be recorded (see "Run it yourself").
 | Check | Result |
 |---|---|
 | Portrait, 16× playback, gestures on | 60 fps, minimum 59.9; 22 brush colour changes over 152 strokes; finished 10:23 (last wash dried naturally) |
-| Portrait, instant mode, final | similarity 69.0 (ΔE 6.4, SSIM 0.518, edge r 0.71) |
+| Portrait, untrimmed gestures + coverage planner + step-back passes (instant mode) | similarity 54.4 (ΔE 9.3, SSIM 0.402, edge r 0.35); 247 gap strokes |
+| Lettering, same build, Balanced (400 px) | similarity 68.0 (ΔE 8.7, SSIM 0.663, edge r 0.66) |
+| Earlier build that trimmed gestures to the target (for comparison) | portrait 69.0 — higher score, but drops and strokes took the target's exact shapes |
 | Lettering, Maximum detail (800×800), 16× | analysis 450 ms; minimum 49 fps during the busiest stage |
 | Synthetic headless test (Node, 360×270) | 9,000 steps, 1.5 ms average per step |
 

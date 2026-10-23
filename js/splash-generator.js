@@ -12,6 +12,7 @@
  */
 
 import { Rng } from './prng.js';
+import { brushPath } from './gesture-animator.js';
 
 const PROFILE_N = 64;
 
@@ -53,6 +54,27 @@ export class SplashGenerator {
 	_idx( x, y ) {
 		const { W, H } = this.an;
 		return Math.min( H - 1, Math.max( 0, Math.round( y ) ) ) * W + Math.min( W - 1, Math.max( 0, Math.round( x ) ) );
+	}
+
+	/**
+	 * Is pigment k really part of the colour at (x, y)? Untrimmed gestures lay
+	 * one tone over their whole footprint, so a wrong colour would show in full.
+	 */
+	belongs( k, x, y ) {
+		const m = this.model;
+		const i = this._idx( x, y );
+		// Compare how much of each pigment the spot calls for (not how dark each
+		// one is), so a light main colour is not overruled by a strong accent.
+		let best = 0;
+		for ( let j = 0; j < m.K; j++ ) {
+			best = Math.max( best, m.T[ 0 ][ j ][ i ] );
+		}
+		return best > 0 && m.T[ 0 ][ k ][ i ] >= 0.35 * best;
+	}
+
+	/** Distance (cells) from (x, y) to the nearest border between areas. */
+	roomAt( x, y ) {
+		return this.an.room ? this.an.room[ this._idx( x, y ) ] : Infinity;
 	}
 
 	/** Strongest edge within radius r of (x, y): borders between colour areas. */
@@ -101,14 +123,14 @@ export class SplashGenerator {
 			}
 			const nd = m.need( k, level, i );
 			const s = nd * m.normA[ k ];
-			if ( nd > 0.015 && s > bestS ) {
+			if ( nd > 0.015 && s > bestS && this.belongs( k, x, y ) ) {
 				bestS = s;
 				best = k;
 			}
 		}
 		if ( prefer >= 0 && best >= 0 && prefer !== best ) {
 			const nd = m.need( prefer, level, i );
-			if ( nd > 0.015 && nd * m.normA[ prefer ] > 0.6 * bestS ) {
+			if ( nd > 0.015 && nd * m.normA[ prefer ] > 0.85 * bestS && this.belongs( prefer, x, y ) ) {
 				return prefer;
 			}
 		}
@@ -168,24 +190,94 @@ export class SplashGenerator {
 		const anim = this.animator;
 		const backlog = anim ? anim.brushFreeAt - this.now : 0;
 		if ( anim && ! extra.queue && backlog > 1.2 ) {
-			this._drop( rng, op, x, y, r, k, { crown: 2 + rng.int( 4 ), extra, delay } );
+			// Too close to a border for a blot: leave it for a later brush pass.
+			const room = this.roomAt( x, y );
+			if ( room >= r * 0.9 ) {
+				this._drop( rng, op, x, y, r, k, { crown: 2 + rng.int( 4 ), extra, delay, fit: room * 0.95 } );
+			}
 			return null;
 		}
 		if ( anim && extra.queue && backlog > 3 ) {
 			// The hand is busy: this mark is left for a later pass.
 			return null;
 		}
-		const blob = this._stamp( rng, op, x, y, r, k, extra );
 		if ( k >= 0 ) {
 			this.loaded = k;
 		}
 		this.handX = x;
 		this.handY = y;
-		const R = r * blob.reach * 0.85;
-		const passes = extra.passes ?? Math.max( 1, Math.min( 5, Math.ceil( R / ( this.an.B * 0.03 ) ) ) );
-		blob.passes = passes;
+		const B = this.an.B;
+		const dir = extra.rot ?? rng.range( 0, Math.PI * 2 );
+		const dx = Math.cos( dir );
+		const dy = Math.sin( dir );
+		// Detail strokes are long and thin along a contour; washes are
+		// back-and-forth passes across an area.
+		const contour = undefined !== extra.aspect && 1 === extra.passes;
+		let R = contour ? r * extra.aspect : r * 1.2;
+		let passes = extra.passes ?? Math.max( 1, Math.min( 5, Math.ceil( R / ( B * 0.03 ) ) ) );
+		if ( extra.fitR ) {
+			// Planned footprint: passes plus tip stay within fitR.
+			passes = Math.max( 1, Math.min( 5, Math.ceil( extra.fitR / ( B * 0.03 ) ) ) );
+			R = ( extra.fitR * passes ) / ( passes + 1 );
+		}
+		const tip = Math.max( 0.8, contour ? r * 0.9 : R / passes );
+		// The paint is exactly the ribbon the tip sweeps along this path. The tip
+		// only touches paper where there is room for it; near a border the brush
+		// lifts instead of crossing (nothing is trimmed afterwards).
+		const keepIn = contour ? 0.45 : 0.8;
+		const M = Math.max( 6, Math.ceil( ( passes * 2 * R ) / Math.max( 0.6, tip * 0.5 ) ) );
+		const path = new Float32Array( M * 4 );
+		const shape = { x, y, R, passes, dx, dy };
+		for ( let j = 0; j < M; j++ ) {
+			const sj = ( j + 0.5 ) / M;
+			const pt = brushPath( shape, sj );
+			const u = sj * passes - Math.floor( sj * passes );
+			const press = 0.55 + 0.45 * Math.min( 1, u / 0.15, ( 1 - u ) / 0.15 ) * ( 1 - 0.4 * pt.turn );
+			const tr = tip * press;
+			const inside = pt.x >= 0 && pt.y >= 0 && pt.x < this.an.W && pt.y < this.an.H;
+			path[ j * 4 ] = pt.x;
+			path[ j * 4 + 1 ] = pt.y;
+			path[ j * 4 + 2 ] = sj;
+			// The tip touches paper only where there is room for it and where
+			// this colour belongs (k < 0 is clear water).
+			// Contour strokes are meant to sit on the edge: they only need the
+			// colour to belong there (their tip is sized to the shape).
+			const roomy = contour || extra.fitR || this.roomAt( pt.x, pt.y ) >= tr * keepIn;
+			const ok = inside && roomy && ( k < 0 || this.belongs( k, pt.x, pt.y ) );
+			path[ j * 4 + 3 ] = ok ? tr : 0;
+		}
+		// No dabs: a touch shorter than a few tip-widths would leave a dot, so
+		// the brush stays lifted there.
+		const minRun = Math.max( 3, Math.ceil( ( 3 * tip ) / ( ( passes * 2 * R ) / M ) ) );
+		for ( let j = 0; j < M; ) {
+			if ( ! path[ j * 4 + 3 ] ) {
+				j++;
+				continue;
+			}
+			let e = j;
+			while ( e < M && path[ e * 4 + 3 ] ) {
+				e++;
+			}
+			if ( e - j < minRun ) {
+				for ( let q = j; q < e; q++ ) {
+					path[ q * 4 + 3 ] = 0;
+				}
+			}
+			j = e;
+		}
+		const blob = {
+			brush: true,
+			k,
+			level: op.level ?? 1,
+			amount: ( op.amount ?? 0.6 ) * rng.range( 0.88, 1.08 ),
+			water: extra.water ?? ( op.water ?? 0.5 ) * rng.range( 0.88, 1.12 ),
+			minNeed: extra.minNeed ?? 0.012,
+			spill: 0,
+			seed: rng.u32(),
+			path,
+		};
 		// Small marks are quick flicks of a fine brush; washes take their time.
-		const size = Math.min( 1, r / ( this.an.B * 0.025 ) );
+		const size = Math.min( 1, ( contour ? r : R ) / ( B * 0.025 ) );
 		const dur = ( 0.25 + passes * rng.range( 0.4, 0.6 ) ) * ( extra.slow ?? 1 ) * ( 0.45 + 0.55 * size );
 		const approach = 0.08 + 0.14 * size;
 		const start = anim ? Math.max( this.now + delay, anim.brushFreeAt + approach ) : 0;
@@ -203,9 +295,9 @@ export class SplashGenerator {
 			y,
 			R,
 			passes,
-			tip: Math.max( 0.8, ( R / passes ) * 0.8 ),
-			dx: blob.dx,
-			dy: blob.dy,
+			tip,
+			dx,
+			dy,
 		} );
 		return { start, dur };
 	}
@@ -214,11 +306,19 @@ export class SplashGenerator {
 	 * A drop falls, lands and blooms outward; heavier drops throw a crown of
 	 * satellite droplets (particles) that bloom where they land.
 	 */
-	_drop( rng, op, x, y, r, k, { crown = 0, spray = 0, extra = {}, delay = 0, color } = {} ) {
+	_drop( rng, op, x, y, r, k, { crown = 0, spray = 0, extra = {}, delay = 0, color, fit = Infinity } = {} ) {
 		const an = this.an;
 		const fall = rng.range( 0.3, 0.42 );
 		const start = this.now + delay + fall;
-		const blob = this._stamp( rng, op, x, y, r, k, { amp: 0.22, soft: 0.4, ...extra } );
+		// Drops are never clipped to the target shape: one tone, an organic
+		// outline, sized by the caller to fit the room around the landing point.
+		const blob = this._stamp( rng, op, x, y, r, k, { amp: 0.22, soft: 0.4, ...extra, follow: 0 } );
+		blob.uniform = k >= 0;
+		// The whole ragged outline, not just its nominal radius, must fit.
+		if ( blob.r * blob.reach > fit ) {
+			blob.r = Math.max( 1, fit / blob.reach );
+			r = blob.r;
+		}
 		this._emit( blob, {
 			tool: 'drop',
 			mode: 'radial',
@@ -299,7 +399,7 @@ export class SplashGenerator {
 		const sigma = op.r * 0.3 * chaos * ( 1 - 0.85 * edge );
 		const x = Math.min( an.W - 1, Math.max( 0, op.x + rng.normal() * sigma ) );
 		const y = Math.min( an.H - 1, Math.max( 0, op.y + rng.normal() * sigma ) );
-		const r = op.r * rng.range( 0.85, 1.18 );
+		let r = op.r * rng.range( 0.85, 1.18 );
 
 		if ( op.requireDry && ! op.force && ! this.drying.isDryEnough( model, x, y, r ) ) {
 			// Coming back to a wet spot: help that spot dry, then return.
@@ -309,13 +409,13 @@ export class SplashGenerator {
 
 		let k = op.k;
 		const level = op.level ?? 1;
-		if ( k >= 0 && model.need( k, level, this._idx( x, y ) ) < 0.01 ) {
+		if ( k >= 0 && ( model.need( k, level, this._idx( x, y ) ) < 0.01 || ! this.belongs( k, x, y ) ) ) {
 			// The planned pigment is already satisfied here; pick the one that is not.
 			k = this.autoPigment( x, y, level );
 		} else if ( k < 0 && 'bloom' !== op.type && 'wetblend' !== op.type ) {
 			// The plan's colour for this mark, if it still has work to do here.
 			const pk = op.pk ?? -1;
-			k = pk >= 0 && model.need( pk, level, this._idx( x, y ) ) > 0.015 ? pk : this.autoPigment( x, y, level );
+			k = pk >= 0 && model.need( pk, level, this._idx( x, y ) ) > 0.015 && this.belongs( pk, x, y ) ? pk : this.autoPigment( x, y, level );
 		}
 		const B = an.B;
 
@@ -324,13 +424,30 @@ export class SplashGenerator {
 				if ( k < 0 ) {
 					return true;
 				}
-				// Big masses arrive as heavy drops with a crown; later washes mix
-				// drops and brush sweeps.
-				if ( ! op.brushOnly && ( 0 === op.stage || rng.float() < 0.45 ) ) {
+				if ( op.fit ) {
+					// Planned to fit its colour's area: a drop or a brush wash whose
+					// whole natural footprint stays inside it.
+					// Drops for open interiors; near borders the brush lays a cleaner edge.
+					if ( op.drop || ( ! op.brushOnly && op.fit >= B * 0.035 && rng.float() < 0.5 ) ) {
+						this._drop( rng, op, x, y, op.fit, k, {
+							crown: Math.round( 3 + ( op.fit / B ) * 90 ),
+							spray: op.drop && rng.float() < 0.5 ? rng.int( 8 ) : 0,
+							extra: { amp: 0.15, soft: 0.45, aspect: rng.range( 1, 1.12 ) },
+							fit: op.fit,
+						} );
+					} else {
+						this._brush( rng, op, x, y, op.fit, k, { fitR: op.fit } );
+					}
+					return true;
+				}
+				// Unplanned washes: a drop only where it fits, else the brush.
+				const room = this.roomAt( x, y );
+				if ( ! op.brushOnly && room >= r * 0.9 && ( 0 === op.stage || rng.float() < 0.45 ) ) {
 					this._drop( rng, op, x, y, r, k, {
-						crown: Math.round( 4 + ( r / B ) * 110 ),
+						crown: Math.round( 4 + ( Math.min( r, room / 2 ) / B ) * 110 ),
 						spray: rng.float() < 0.5 ? rng.int( 10 ) : 0,
 						extra: { amp: 0.2, soft: 0.45 },
+						fit: room * 0.95,
 					} );
 				} else {
 					this._brush( rng, op, x, y, r, k, { amp: 0.18, soft: 0.45, queue: !! op.brushOnly } );
@@ -349,7 +466,7 @@ export class SplashGenerator {
 					aspect: op.aspect ?? rng.range( 1.8, 3 ),
 					rot: op.rot ?? this._tangent( x, y ) + rng.normal() * 0.15,
 					capMul: 1.05,
-					passes: op.aspect ? undefined : 1,
+					passes: 1,
 					slow: 1.1,
 					queue: true,
 				} );
@@ -359,7 +476,7 @@ export class SplashGenerator {
 				if ( k < 0 ) {
 					return true;
 				}
-				this._drop( rng, op, x, y, r, k, { extra: { amp: 0.05, soft: 0.25, aspect: rng.range( 1, 1.15 ) } } );
+				this._drop( rng, op, x, y, r, k, { extra: { amp: 0.05, soft: 0.25, aspect: rng.range( 1, 1.15 ) }, fit: Math.max( 1.5, this.roomAt( x, y ) ) } );
 				return true;
 
 			case 'wetblend': {

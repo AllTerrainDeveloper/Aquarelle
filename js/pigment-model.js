@@ -205,6 +205,22 @@ export class PigmentModel {
 			b.meanNeed = 0;
 			return true;
 		}
+		if ( b.brush ) {
+			// Tone for the whole stroke: what the area under the path still needs.
+			const Tk = this.T[ b.level ][ b.k ];
+			let sum = 0;
+			let n = 0;
+			const P = b.path;
+			for ( let j = 0; j < P.length; j += 4 ) {
+				if ( P[ j + 3 ] > 0 ) {
+					const i = Math.round( P[ j + 1 ] ) * this.W + Math.round( P[ j ] );
+					sum += Math.max( 0, Tk[ i ] - this.d[ b.k ][ i ] - this.g[ b.k ][ i ] );
+					n++;
+				}
+			}
+			b.meanNeed = n ? sum / n : 0;
+			return b.meanNeed >= b.minNeed;
+		}
 		const { W } = this;
 		const g = this._geom( b );
 		if ( g.x0 > g.x1 || g.y0 > g.y1 ) {
@@ -248,6 +264,9 @@ export class PigmentModel {
 	deposit( b, s0 = 0, s1 = 2, mode = 'none' ) {
 		if ( undefined === b.meanNeed && ! this.prepare( b ) ) {
 			return 0;
+		}
+		if ( b.brush ) {
+			return this._brushStroke( b, s0, s1 );
 		}
 		const { W } = this;
 		const g = this._geom( b );
@@ -321,6 +340,17 @@ export class PigmentModel {
 				let wm = m;
 				if ( k >= 0 ) {
 					const nd = Math.max( 0, Tk[ i ] - dk[ i ] - gk[ i ] );
+					if ( b.uniform ) {
+						// A drop: one tone, its own organic outline, wherever the water goes.
+						const add = b.amount * meanNeed * ( 0.92 + 0.16 * n ) * m;
+						gk[ i ] += add;
+						total += add;
+						if ( b.water > 0 ) {
+							const hv = h[ i ] + b.water * m * ( 0.75 + 0.5 * n );
+							h[ i ] = hv > 1.6 ? 1.6 : hv;
+						}
+						continue;
+					}
 					if ( b.follow > 0 ) {
 						const ratio = nd / ( meanNeed + 1e-4 ) - 0.25 + ( n - 0.5 ) * 0.3;
 						let cov = ratio / 0.35;
@@ -359,6 +389,93 @@ export class PigmentModel {
 		}
 		if ( tx1 >= tx0 ) {
 			this._touch( tx0, ty0, tx1, ty1, bit, b.water > 0 );
+		}
+		return total;
+	}
+
+	/**
+	 * A brush stroke: paint exactly where the tip touches, one tone, ragged
+	 * dry-brush edges. Path samples with s in [s0, s1) are laid down; each
+	 * cell is painted at most once per stroke.
+	 */
+	_brushStroke( b, s0, s1 ) {
+		const { W, H, h } = this;
+		const P = b.path;
+		if ( ! b.mask ) {
+			let x0 = W;
+			let y0 = H;
+			let x1 = 0;
+			let y1 = 0;
+			for ( let j = 0; j < P.length; j += 4 ) {
+				const rr = P[ j + 3 ] * 1.3 + 1;
+				x0 = Math.min( x0, P[ j ] - rr );
+				y0 = Math.min( y0, P[ j + 1 ] - rr );
+				x1 = Math.max( x1, P[ j ] + rr );
+				y1 = Math.max( y1, P[ j + 1 ] + rr );
+			}
+			b.bx0 = Math.max( 0, Math.floor( x0 ) );
+			b.by0 = Math.max( 0, Math.floor( y0 ) );
+			b.bw = Math.max( 1, Math.min( W - 1, Math.ceil( x1 ) ) - b.bx0 + 1 );
+			b.bh = Math.max( 1, Math.min( H - 1, Math.ceil( y1 ) ) - b.by0 + 1 );
+			b.mask = new Uint8Array( b.bw * b.bh );
+			b.tone = b.amount * b.meanNeed;
+		}
+		const k = b.k;
+		const gk = k >= 0 ? this.g[ k ] : null;
+		const seed = b.seed | 0;
+		let total = 0;
+		let tx0 = W;
+		let ty0 = H;
+		let tx1 = -1;
+		let ty1 = -1;
+		for ( let j = 0; j < P.length; j += 4 ) {
+			const sj = P[ j + 2 ];
+			const tr = P[ j + 3 ];
+			if ( sj < s0 || sj >= s1 || tr <= 0 ) {
+				continue;
+			}
+			const cx = P[ j ];
+			const cy = P[ j + 1 ];
+			const ext = tr * 1.25 + 1;
+			const xa = Math.max( b.bx0, Math.floor( cx - ext ) );
+			const xb = Math.min( b.bx0 + b.bw - 1, Math.ceil( cx + ext ) );
+			const ya = Math.max( b.by0, Math.floor( cy - ext ) );
+			const yb = Math.min( b.by0 + b.bh - 1, Math.ceil( cy + ext ) );
+			for ( let y = ya; y <= yb; y++ ) {
+				for ( let x = xa; x <= xb; x++ ) {
+					const mi = ( y - b.by0 ) * b.bw + ( x - b.bx0 );
+					if ( b.mask[ mi ] ) {
+						continue;
+					}
+					const n = valueNoise( x * 0.35, y * 0.35, seed );
+					// Ragged edge: bristles skip on the paper's tooth.
+					const d = Math.hypot( x - cx, y - cy ) / tr + ( n - 0.5 ) * 0.45 + ( this.paper[ y * W + x ] - 0.5 ) * 0.25;
+					if ( d >= 1 ) {
+						continue;
+					}
+					b.mask[ mi ] = 1;
+					const i = y * W + x;
+					if ( this.reserve[ i ] ) {
+						continue;
+					}
+					if ( gk ) {
+						const add = b.tone * ( 0.9 + 0.2 * n );
+						gk[ i ] += add;
+						total += add;
+					}
+					if ( b.water > 0 ) {
+						const hv = h[ i ] + b.water * ( 0.8 + 0.4 * n );
+						h[ i ] = hv > 1.6 ? 1.6 : hv;
+					}
+					tx0 = Math.min( tx0, x );
+					tx1 = Math.max( tx1, x );
+					ty0 = Math.min( ty0, y );
+					ty1 = Math.max( ty1, y );
+				}
+			}
+		}
+		if ( tx1 >= tx0 ) {
+			this._touch( tx0, ty0, tx1, ty1, k >= 0 ? 1 << k : 0, b.water > 0 );
 		}
 		return total;
 	}

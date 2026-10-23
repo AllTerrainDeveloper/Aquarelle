@@ -52,7 +52,7 @@ self.onmessage = ( e ) => {
 						}
 					}
 				}
-				transfer.push( an.edge.buffer, an.detail.buffer, an.importance.buffer, an.scale.buffer, an.darkness.buffer, an.reserve.buffer );
+				transfer.push( an.edge.buffer, an.detail.buffer, an.importance.buffer, an.scale.buffer, an.darkness.buffer, an.reserve.buffer, an.room.buffer );
 				const labels = Uint8Array.from( an.labels );
 				transfer.push( labels.buffer );
 				const { lab, labels: _l, regionOf, regions, ...rest } = an;

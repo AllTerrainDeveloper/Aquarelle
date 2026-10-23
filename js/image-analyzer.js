@@ -643,6 +643,56 @@ export function analyzeImage( { width: W, height: H, pixels, K, seed } ) {
 	}
 	mark( 'reserve' );
 
+	/* Room for a drop: distance to the nearest border -------------------- */
+	// Drops are never clipped to a shape; the painter keeps them inside an
+	// area by size and placement. Chamfer distance (cells) to the nearest
+	// strong edge; the sheet border is not a border.
+	const room = new Float32Array( N );
+	for ( let i = 0; i < N; i++ ) {
+		room[ i ] = edge[ i ] > 0.3 ? 0 : 1e9;
+	}
+	const D1 = 1;
+	const D2 = Math.SQRT2;
+	for ( let y = 0; y < H; y++ ) {
+		for ( let x = 0; x < W; x++ ) {
+			const i = y * W + x;
+			let v = room[ i ];
+			if ( x > 0 ) {
+				v = Math.min( v, room[ i - 1 ] + D1 );
+			}
+			if ( y > 0 ) {
+				v = Math.min( v, room[ i - W ] + D1 );
+				if ( x > 0 ) {
+					v = Math.min( v, room[ i - W - 1 ] + D2 );
+				}
+				if ( x < W - 1 ) {
+					v = Math.min( v, room[ i - W + 1 ] + D2 );
+				}
+			}
+			room[ i ] = v;
+		}
+	}
+	for ( let y = H - 1; y >= 0; y-- ) {
+		for ( let x = W - 1; x >= 0; x-- ) {
+			const i = y * W + x;
+			let v = room[ i ];
+			if ( x < W - 1 ) {
+				v = Math.min( v, room[ i + 1 ] + D1 );
+			}
+			if ( y < H - 1 ) {
+				v = Math.min( v, room[ i + W ] + D1 );
+				if ( x < W - 1 ) {
+					v = Math.min( v, room[ i + W + 1 ] + D2 );
+				}
+				if ( x > 0 ) {
+					v = Math.min( v, room[ i + W - 1 ] + D2 );
+				}
+			}
+			room[ i ] = Math.min( v, B );
+		}
+	}
+	mark( 'room' );
+
 	// Palette fidelity: how well can this palette reproduce the image at all?
 	let paletteDE = 0;
 	for ( let i = 0; i < N; i += 3 ) {
@@ -671,6 +721,7 @@ export function analyzeImage( { width: W, height: H, pixels, K, seed } ) {
 		scale,
 		darkness,
 		reserve,
+		room,
 		labels,
 		regionOf,
 		regions,

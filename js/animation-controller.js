@@ -12,7 +12,7 @@
  */
 
 import { Rng } from './prng.js';
-import { STAGES, stageAt } from './composition-planner.js';
+import { STAGES, stageAt, planGapStrokes } from './composition-planner.js';
 
 const BASE_DT = 1 / 30; // painting seconds per simulation step
 
@@ -56,6 +56,10 @@ export class AnimationController {
 		this.lastEvalReal = 0;
 		this.lastScores = null;
 		this.finishing = false;
+		// Step-back passes: moments when the painter looks at the sheet and
+		// fills what is still bare.
+		this.gapPasses = [ 0.55, 0.8, 0.93 ];
+		this.gapStrokes = 0;
 		this.state = 'ready';
 		this.adaptive.reset();
 		this.renderer.needsDraw = true;
@@ -219,7 +223,10 @@ export class AnimationController {
 		}
 		this.corrections.paint++;
 		const small = r < an.B * 0.03;
+		// Sized to the spot, never trimmed: room to the nearest border plus a seam.
+		const fit = Math.min( r * 1.2, this.splash.roomAt( p.x, p.y ) + Math.max( 2, an.B * 0.015 ) );
 		return {
+			fit: small ? undefined : fit,
 			type: small ? 'detail' : 'wash',
 			k,
 			x: p.x,
@@ -268,8 +275,29 @@ export class AnimationController {
 		this.deferred.push( concrete );
 	}
 
+	/** Plan fine strokes for the gaps that are still bare, over the next window. */
+	_stepBack() {
+		const u = this.gapPasses.shift();
+		const window = ( ( this.gapPasses[ 0 ] ?? 0.99 ) - u ) * this.duration * 0.85;
+		const ops = planGapStrokes( this.model, this.an, {
+			budget: Math.max( 10, Math.round( window * 1.1 ) ),
+			seed: ( this.plan.ops.length * 7919 + Math.round( u * 1000 ) ) >>> 0,
+			handX: this.splash.handX,
+			handY: this.splash.handY,
+		} );
+		ops.forEach( ( op, n ) => {
+			op.t = this.simTime + 0.5 + ( ( n + 0.5 ) / ops.length ) * window;
+			op.stage = stageAt( op.t / this.duration );
+			this.deferred.push( op );
+		} );
+		this.gapStrokes += ops.length;
+	}
+
 	_simulate( frameStart ) {
 		const q = this.adaptive.q;
+		if ( this.gapPasses.length && this.simTime >= this.gapPasses[ 0 ] * this.duration ) {
+			this._stepBack();
+		}
 		const deadline = frameStart + q.simBudget;
 		const ops = this.plan.ops;
 		const dt = BASE_DT * this.adaptive.dtScale;
@@ -354,7 +382,7 @@ export class AnimationController {
 			const handBusy = this.animator.brushFreeAt - this.animator.clock > 2.5;
 			const dtPaint = handBusy ? 0 : dtReal * this.speed;
 			const atEnd = this.simTime >= this.duration - BASE_DT * this.adaptive.dtScale;
-			const planDone = this.cursor >= this.plan.ops.length && 0 === this.deferred.length && ! this.animator.busy;
+			const planDone = this.cursor >= this.plan.ops.length && 0 === this.deferred.length && ! this.animator.busy && ! this.gapPasses.length;
 			if ( atEnd && planDone ) {
 				this.finishing = true;
 			}
