@@ -280,7 +280,7 @@ export class AnimationController {
 		const u = this.gapPasses.shift();
 		const window = ( ( this.gapPasses[ 0 ] ?? 0.99 ) - u ) * this.duration * 0.85;
 		const ops = planGapStrokes( this.model, this.an, {
-			budget: Math.max( 10, Math.round( window * 1.1 ) ),
+			budget: Math.max( 8, window * 0.9 ),
 			seed: ( this.plan.ops.length * 7919 + Math.round( u * 1000 ) ) >>> 0,
 			handX: this.splash.handX,
 			handY: this.splash.handY,

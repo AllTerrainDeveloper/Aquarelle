@@ -93,6 +93,247 @@ const smooth = ( a, b, x ) => {
 	return t * t * ( 3 - 2 * t );
 };
 
+/* ---------------------------------------------------------------------- */
+/* Shared painting geometry                                                */
+/* ---------------------------------------------------------------------- */
+
+/**
+ * Chamfer distance from each masked cell to the nearest unmasked cell
+ * (0 outside). The sheet edge is not a border.
+ */
+export function depthInside( mask, W, H, cap = Infinity ) {
+	const N = W * H;
+	const d = new Float32Array( N );
+	for ( let i = 0; i < N; i++ ) {
+		d[ i ] = mask[ i ] ? 1e9 : 0;
+	}
+	const S2 = Math.SQRT2;
+	for ( let y = 0; y < H; y++ ) {
+		for ( let x = 0; x < W; x++ ) {
+			const i = y * W + x;
+			if ( ! d[ i ] ) {
+				continue;
+			}
+			let v = d[ i ];
+			if ( x > 0 ) {
+				v = Math.min( v, d[ i - 1 ] + 1 );
+			}
+			if ( y > 0 ) {
+				v = Math.min( v, d[ i - W ] + 1 );
+				if ( x > 0 ) {
+					v = Math.min( v, d[ i - W - 1 ] + S2 );
+				}
+				if ( x < W - 1 ) {
+					v = Math.min( v, d[ i - W + 1 ] + S2 );
+				}
+			}
+			d[ i ] = v;
+		}
+	}
+	for ( let y = H - 1; y >= 0; y-- ) {
+		for ( let x = W - 1; x >= 0; x-- ) {
+			const i = y * W + x;
+			if ( ! d[ i ] ) {
+				continue;
+			}
+			let v = d[ i ];
+			if ( x < W - 1 ) {
+				v = Math.min( v, d[ i + 1 ] + 1 );
+			}
+			if ( y < H - 1 ) {
+				v = Math.min( v, d[ i + W ] + 1 );
+				if ( x < W - 1 ) {
+					v = Math.min( v, d[ i + W + 1 ] + S2 );
+				}
+				if ( x > 0 ) {
+					v = Math.min( v, d[ i + W - 1 ] + S2 );
+				}
+			}
+			d[ i ] = Math.min( v, cap );
+		}
+	}
+	return d;
+}
+
+/**
+ * Largest-first packing: the deepest uncovered cell gets the biggest gesture
+ * whose footprint fits (plus a seam so neighbouring washes meet).
+ */
+export function packDiscs( mask, depth, covered, { W, H, maxR, minR, jitter, seam, rng, limit = Infinity } ) {
+	const N = W * H;
+	const cand = [];
+	for ( let i = 0; i < N; i++ ) {
+		if ( mask[ i ] && depth[ i ] * 0.9 >= minR ) {
+			cand.push( i );
+		}
+	}
+	cand.sort( ( a, b ) => depth[ b ] - depth[ a ] );
+	const discs = [];
+	for ( const c of cand ) {
+		if ( covered[ c ] || discs.length >= limit ) {
+			continue;
+		}
+		const cx = c % W;
+		const cy = ( c / W ) | 0;
+		const ang = rng.range( 0, Math.PI * 2 );
+		const off = jitter * depth[ c ] * rng.float();
+		const x = Math.min( W - 1, Math.max( 0, cx + Math.cos( ang ) * off ) );
+		const y = Math.min( H - 1, Math.max( 0, cy + Math.sin( ang ) * off ) );
+		const fit = Math.min( maxR, ( depth[ c ] - off ) * 0.9 + seam ) * rng.range( 0.85, 1 );
+		if ( fit < minR ) {
+			continue;
+		}
+		discs.push( { x, y, fit } );
+		// Neighbouring gestures overlap a little, like real washes.
+		const rc = fit * 0.8;
+		for ( let yy = Math.max( 0, Math.floor( y - rc ) ); yy <= Math.min( H - 1, Math.ceil( y + rc ) ); yy++ ) {
+			for ( let xx = Math.max( 0, Math.floor( x - rc ) ); xx <= Math.min( W - 1, Math.ceil( x + rc ) ); xx++ ) {
+				if ( ( xx - x ) ** 2 + ( yy - y ) ** 2 <= rc * rc ) {
+					covered[ yy * W + xx ] = 1;
+				}
+			}
+		}
+	}
+	return discs;
+}
+
+/**
+ * Centreline strokes for one shape (a list of cell indices): the shape's
+ * spine is covered by discs that fit its local width (deepest first), then
+ * chained nearest-first into brush paths that follow its curves. The brush
+ * lifts between separate parts. Each path is [x, y, r] triples; the tip
+ * radius follows the local half-width, like pressure on a round brush.
+ */
+export function centrelineStrokes( cells, W, { minR = 0.7, maxSamples = 160 } = {} ) {
+	let x0 = Infinity;
+	let y0 = Infinity;
+	let x1 = -Infinity;
+	let y1 = -Infinity;
+	for ( const i of cells ) {
+		const x = i % W;
+		const y = ( i / W ) | 0;
+		x0 = Math.min( x0, x );
+		y0 = Math.min( y0, y );
+		x1 = Math.max( x1, x );
+		y1 = Math.max( y1, y );
+	}
+	// Local grid with a one-cell border so the shape edge counts as outside.
+	const lw = x1 - x0 + 3;
+	const lh = y1 - y0 + 3;
+	const local = new Uint8Array( lw * lh );
+	for ( const i of cells ) {
+		local[ ( ( ( i / W ) | 0 ) - y0 + 1 ) * lw + ( ( i % W ) - x0 + 1 ) ] = 1;
+	}
+	const depth = depthInside( local, lw, lh );
+	const order = [];
+	for ( let i = 0; i < local.length; i++ ) {
+		if ( local[ i ] ) {
+			order.push( i );
+		}
+	}
+	order.sort( ( a, b ) => depth[ b ] - depth[ a ] );
+	const covered = new Uint8Array( local.length );
+	const discs = [];
+	for ( const c of order ) {
+		if ( covered[ c ] ) {
+			continue;
+		}
+		const cx = c % lw;
+		const cy = ( c / lw ) | 0;
+		const r = Math.max( minR, depth[ c ] * 0.95 );
+		discs.push( { x: cx + x0 - 1, y: cy + y0 - 1, r } );
+		const rc = Math.max( 1, r );
+		for ( let yy = Math.max( 0, Math.floor( cy - rc ) ); yy <= Math.min( lh - 1, Math.ceil( cy + rc ) ); yy++ ) {
+			for ( let xx = Math.max( 0, Math.floor( cx - rc ) ); xx <= Math.min( lw - 1, Math.ceil( cx + rc ) ); xx++ ) {
+				if ( ( xx - cx ) ** 2 + ( yy - cy ) ** 2 <= rc * rc ) {
+					covered[ yy * lw + xx ] = 1;
+				}
+			}
+		}
+	}
+	if ( ! discs.length ) {
+		return [];
+	}
+	// Start at an extremity (furthest from the centroid), then walk nearest-first.
+	let mx = 0;
+	let my = 0;
+	for ( const d of discs ) {
+		mx += d.x;
+		my += d.y;
+	}
+	mx /= discs.length;
+	my /= discs.length;
+	let start = 0;
+	let far = -1;
+	discs.forEach( ( d, n ) => {
+		const dd = Math.hypot( d.x - mx, d.y - my );
+		if ( dd > far ) {
+			far = dd;
+			start = n;
+		}
+	} );
+	const used = new Uint8Array( discs.length );
+	const chains = [];
+	let chain = [ discs[ start ] ];
+	used[ start ] = 1;
+	let cur = discs[ start ];
+	for ( let n = 1; n < discs.length; n++ ) {
+		let best = -1;
+		let bd = Infinity;
+		for ( let j = 0; j < discs.length; j++ ) {
+			if ( ! used[ j ] ) {
+				const dd = Math.hypot( discs[ j ].x - cur.x, discs[ j ].y - cur.y );
+				if ( dd < bd ) {
+					bd = dd;
+					best = j;
+				}
+			}
+		}
+		used[ best ] = 1;
+		const nxt = discs[ best ];
+		// Lift the brush rather than drag it across bare paper.
+		if ( bd > ( cur.r + nxt.r ) * 1.6 + 1 ) {
+			chains.push( chain );
+			chain = [];
+		}
+		chain.push( nxt );
+		cur = nxt;
+	}
+	chains.push( chain );
+	// Densify each chain into a smooth path of tip samples.
+	const strokes = [];
+	for ( const ch of chains ) {
+		const pts = [];
+		for ( let n = 0; n < ch.length; n++ ) {
+			const a = ch[ n ];
+			const b = ch[ n + 1 ];
+			pts.push( a.x, a.y, a.r );
+			if ( b ) {
+				const dist = Math.hypot( b.x - a.x, b.y - a.y );
+				const steps = Math.floor( dist / Math.max( 0.5, 0.5 * Math.min( a.r, b.r ) ) );
+				for ( let q = 1; q < steps; q++ ) {
+					const t = q / steps;
+					pts.push( a.x + ( b.x - a.x ) * t, a.y + ( b.y - a.y ) * t, a.r + ( b.r - a.r ) * t );
+				}
+			}
+		}
+		// Long chains become several strokes, as a hand would.
+		for ( let o = 0; o < pts.length; o += maxSamples * 3 ) {
+			const part = pts.slice( o, o + maxSamples * 3 + 3 );
+			let len = 0;
+			let rs = 0;
+			for ( let q = 0; q < part.length; q += 3 ) {
+				rs += part[ q + 2 ];
+				if ( q ) {
+					len += Math.hypot( part[ q ] - part[ q - 3 ], part[ q + 1 ] - part[ q - 2 ] );
+				}
+			}
+			strokes.push( { pts: Float32Array.from( part ), len, r: rs / ( part.length / 3 ), x: part[ 0 ], y: part[ 1 ] } );
+		}
+	}
+	return strokes;
+}
+
 export function planComposition( an, { duration, seed, density = 1, fineDetail = { strokes: 1, fine: 1 } } ) {
 	const t0 = performance.now();
 	const rng = new Rng( ( seed ^ 0x9e3779b9 ) >>> 0 );
@@ -140,96 +381,8 @@ export function planComposition( an, { duration, seed, density = 1, fineDetail =
 	};
 	// Chamfer distance from each area cell to the nearest cell outside the
 	// area (the sheet edge is not a border).
-	const depthIn = ( mask ) => {
-		const d = new Float32Array( N );
-		for ( let i = 0; i < N; i++ ) {
-			d[ i ] = mask[ i ] ? 1e9 : 0;
-		}
-		const S2 = Math.SQRT2;
-		for ( let y = 0; y < H; y++ ) {
-			for ( let x = 0; x < W; x++ ) {
-				const i = y * W + x;
-				if ( ! d[ i ] ) {
-					continue;
-				}
-				let v = d[ i ];
-				if ( x > 0 ) {
-					v = Math.min( v, d[ i - 1 ] + 1 );
-				}
-				if ( y > 0 ) {
-					v = Math.min( v, d[ i - W ] + 1 );
-					if ( x > 0 ) {
-						v = Math.min( v, d[ i - W - 1 ] + S2 );
-					}
-					if ( x < W - 1 ) {
-						v = Math.min( v, d[ i - W + 1 ] + S2 );
-					}
-				}
-				d[ i ] = v;
-			}
-		}
-		for ( let y = H - 1; y >= 0; y-- ) {
-			for ( let x = W - 1; x >= 0; x-- ) {
-				const i = y * W + x;
-				if ( ! d[ i ] ) {
-					continue;
-				}
-				let v = d[ i ];
-				if ( x < W - 1 ) {
-					v = Math.min( v, d[ i + 1 ] + 1 );
-				}
-				if ( y < H - 1 ) {
-					v = Math.min( v, d[ i + W ] + 1 );
-					if ( x < W - 1 ) {
-						v = Math.min( v, d[ i + W + 1 ] + S2 );
-					}
-					if ( x > 0 ) {
-						v = Math.min( v, d[ i + W - 1 ] + S2 );
-					}
-				}
-				d[ i ] = Math.min( v, B );
-			}
-		}
-		return d;
-	};
-	const pack = ( mask, depth, covered, maxR, minR, jitter ) => {
-		const cand = [];
-		for ( let i = 0; i < N; i++ ) {
-			if ( mask[ i ] && depth[ i ] * 0.9 >= minR ) {
-				cand.push( i );
-			}
-		}
-		cand.sort( ( a, b ) => depth[ b ] - depth[ a ] );
-		const discs = [];
-		for ( const c of cand ) {
-			if ( covered[ c ] ) {
-				continue;
-			}
-			const cx = c % W;
-			const cy = ( c / W ) | 0;
-			const ang = rng.range( 0, Math.PI * 2 );
-			const off = jitter * depth[ c ] * rng.float();
-			const x = Math.min( W - 1, Math.max( 0, cx + Math.cos( ang ) * off ) );
-			const y = Math.min( H - 1, Math.max( 0, cy + Math.sin( ang ) * off ) );
-			// Neighbouring washes meet and overlap slightly at the border, as real
-			// washes do (a faint darker seam), rather than leaving bare paper.
-			const fit = Math.min( maxR, ( depth[ c ] - off ) * 0.9 + seam ) * rng.range( 0.85, 1 );
-			if ( fit < minR ) {
-				continue;
-			}
-			discs.push( { x, y, fit } );
-			// Neighbouring gestures overlap a little, like real washes.
-			const rc = fit * 0.8;
-			for ( let yy = Math.max( 0, Math.floor( y - rc ) ); yy <= Math.min( H - 1, Math.ceil( y + rc ) ); yy++ ) {
-				for ( let xx = Math.max( 0, Math.floor( x - rc ) ); xx <= Math.min( W - 1, Math.ceil( x + rc ) ); xx++ ) {
-					if ( ( xx - x ) ** 2 + ( yy - y ) ** 2 <= rc * rc ) {
-						covered[ yy * W + xx ] = 1;
-					}
-				}
-			}
-		}
-		return discs;
-	};
+	const depthIn = ( mask ) => depthInside( mask, W, H, B );
+	const pack = ( mask, depth, covered, maxR, minR, jitter ) => packDiscs( mask, depth, covered, { W, H, maxR, minR, jitter, seam, rng } );
 	const seam = Math.max( 2, B * 0.015 );
 	const leftover = []; // per pigment: area cells no disc reached (for stage 4)
 	const bigR = B * 0.06;
@@ -352,12 +505,11 @@ export function planComposition( an, { duration, seed, density = 1, fineDetail =
 	/* 4. Detail: paint exactly what the broad washes could not ---------- */
 	// For each colour, the fine brush's job is the fine target minus what the
 	// wash-level target already gives (a letter, a sliver of blue around a
-	// white letter, an eyelid). Each such leftover shape gets one or more
-	// near-dry strokes sized and oriented to it (principal axes), instead of
-	// random dabs. One hand, natural pace: the stroke budget follows the stage
-	// length; the most visible shapes go first and the rest is left to the
-	// corrections.
-	const handBudget = Math.round( ( STAGES[ 4 ].t1 - STAGES[ 4 ].t0 ) * duration * 1.2 * fineDetail.strokes * density );
+	// white letter, an eyelid), plus what no packed wash reached. Each such
+	// shape is painted with near-dry strokes that follow its centreline, the
+	// tip widening and narrowing with it. One hand, natural pace: strokes fit
+	// in the time the stage allows, most visible first; the rest is left to
+	// the step-back passes and corrections.
 	const shapes = [];
 	const seen = new Uint8Array( N );
 	const stack = new Int32Array( N );
@@ -374,8 +526,6 @@ export function planComposition( an, { duration, seed, density = 1, fineDetail =
 			if ( seen[ s0 ] || ! inShape( s0 ) ) {
 				continue;
 			}
-			// Collect the shape, then cut it into stroke-sized pieces so curved
-			// bands (a ring along a border) get several strokes that follow them.
 			let sp = 0;
 			stack[ sp++ ] = s0;
 			seen[ s0 ] = 1;
@@ -396,88 +546,41 @@ export function planComposition( an, { duration, seed, density = 1, fineDetail =
 			if ( cells.length < 3 ) {
 				continue;
 			}
-			const G = Math.max( 4, B * 0.04 );
-			const groups = new Map();
-			for ( const i of cells ) {
-				const key = Math.floor( ( i % W ) / G ) + 4096 * Math.floor( ( ( i / W ) | 0 ) / G );
-				if ( ! groups.has( key ) ) {
-					groups.set( key, [] );
-				}
-				groups.get( key ).push( i );
+			// The fine brush follows each shape's centreline.
+			let mass = 0;
+			for ( const c of cells ) {
+				mass += Math.max( 0.05, T0k[ c ] - T1k[ c ] ) * importance[ c ];
 			}
-			for ( const part of groups.values() ) {
-				if ( part.length < 3 ) {
-					continue;
-				}
-				let n = 0;
-				let sx = 0;
-				let sy = 0;
-				let sxx = 0;
-				let syy = 0;
-				let sxy = 0;
-				let mass = 0;
-				for ( const i of part ) {
-					const x = i % W;
-					const y = ( i / W ) | 0;
-					n++;
-					sx += x;
-					sy += y;
-					sxx += x * x;
-					syy += y * y;
-					sxy += x * y;
-					mass += Math.max( 0.05, T0k[ i ] - T1k[ i ] ) * importance[ i ];
-				}
-				const mx = sx / n;
-				const my = sy / n;
-				const cxx = sxx / n - mx * mx;
-				const cyy = syy / n - my * my;
-				const cxy = sxy / n - mx * my;
-				const tr = cxx + cyy;
-				const det = cxx * cyy - cxy * cxy;
-				const disc = Math.sqrt( Math.max( 0, ( tr * tr ) / 4 - det ) );
-				shapes.push( {
-					k,
-					x: mx,
-					y: my,
-					angle: 0.5 * Math.atan2( 2 * cxy, cxx - cyy ),
-					half: 2 * Math.sqrt( tr / 2 + disc ) + 1,
-					width: 2 * Math.sqrt( Math.max( 0, tr / 2 - disc ) ) + 1,
-					mass,
-				} );
+			const strokes = centrelineStrokes( cells, W );
+			for ( const st of strokes ) {
+				shapes.push( { k, st, mass: mass / strokes.length } );
 			}
 		}
 	}
+	// Most visible shapes first, within the time one hand has in this stage.
 	shapes.sort( ( a, b ) => b.mass - a.mass );
-	let strokes = 0;
+	const handSeconds = ( STAGES[ 4 ].t1 - STAGES[ 4 ].t0 ) * duration * 0.85 * fineDetail.strokes * density;
+	let used = 0;
 	for ( const sh of shapes ) {
-		const across = Math.max( 1.2, sh.width * 1.15 );
-		const pieces = Math.max( 1, Math.ceil( sh.half / ( 3 * across ) ) );
-		if ( strokes + pieces > handBudget ) {
+		const secs = 0.55 + sh.st.len / ( B * 0.3 );
+		if ( used + secs > handSeconds ) {
 			continue;
 		}
-		strokes += pieces;
-		const ux = Math.cos( sh.angle );
-		const uy = Math.sin( sh.angle );
-		for ( let j = 0; j < pieces; j++ ) {
-			const off = -sh.half + ( ( 2 * j + 1 ) * sh.half ) / pieces;
-			add( 4, {
-				type: 'detail',
-				k: sh.k,
-				x: sh.x + ux * off,
-				y: sh.y + uy * off,
-				r: across,
-				rot: sh.angle,
-				aspect: Math.min( 3.2, Math.max( 1, ( ( sh.half / pieces ) * 1.15 ) / across ) ),
-				amount: 0.95,
-				water: rng.range( 0.08, 0.14 ),
-				flat: 0.05,
-				follow: 0.97,
-				level: 0,
-				chaos: 0.15,
-				requireDry: true,
-				order: darkness[ at( sh.x, sh.y ) ] + rng.range( 0, 0.2 ),
-			} );
-		}
+		used += secs;
+		add( 4, {
+			type: 'detail',
+			k: sh.k,
+			x: sh.st.x,
+			y: sh.st.y,
+			r: sh.st.r,
+			path: sh.st.pts,
+			amount: 0.95,
+			water: rng.range( 0.1, 0.16 ),
+			level: 0,
+			chaos: 0.1,
+			requireDry: true,
+			order: darkness[ at( sh.st.x, sh.st.y ) ] + rng.range( 0, 0.2 ),
+		} );
 	}
 
 	/* 5. Splashes & accents: decorative, in the background, off the edges */
@@ -759,10 +862,10 @@ export function planComposition( an, { duration, seed, density = 1, fineDetail =
 }
 
 /**
- * Step-back pass: look at the painting as it is and plan fine strokes for
- * whatever is still mostly bare where a colour belongs. Gaps are found per
- * pigment, cut into stroke-sized pieces, and returned grouped by colour and
- * walked nearest-first (from the brush position).
+ * Step-back pass: look at the painting as it is, find where each colour is
+ * still bare or clearly too light, glaze the larger such areas with washes
+ * sized to fit and paint the rest along its centreline. Returned grouped by
+ * colour and walked nearest-first from the brush. `budget` is hand seconds.
  *
  * @return {Object[]} ops (without times), in painting order.
  */
@@ -783,7 +886,7 @@ export function planGapStrokes( model, an, { budget, seed, handX, handY } ) {
 	const pieces = [];
 	const seen = new Uint8Array( N );
 	const stack = new Int32Array( N );
-	const G = Math.max( 4, B * 0.035 );
+	const seam = Math.max( 2, B * 0.015 );
 	for ( let k = 0; k < K; k++ ) {
 		if ( pigments[ k ].isPaper ) {
 			continue;
@@ -791,105 +894,101 @@ export function planGapStrokes( model, an, { budget, seed, handX, handY } ) {
 		const Tk = T0[ k ];
 		const dk = model.d[ k ];
 		const gk = model.g[ k ];
-		const gap = ( i ) => Tk[ i ] > 0.06 && Tk[ i ] >= 0.35 * bestT[ i ] && ! model.reserve[ i ] && Tk[ i ] - dk[ i ] - gk[ i ] > 0.5 * Tk[ i ];
+		// Still bare, or clearly too light (shadows, modelling), where k belongs.
+		const mask = new Uint8Array( N );
+		let any = 0;
+		for ( let i = 0; i < N; i++ ) {
+			const need = Tk[ i ] - dk[ i ] - gk[ i ];
+			if ( Tk[ i ] > 0.06 && Tk[ i ] >= 0.35 * bestT[ i ] && ! model.reserve[ i ] && need > Math.max( 0.04, 0.3 * Tk[ i ] ) ) {
+				mask[ i ] = 1;
+				any++;
+			}
+		}
+		if ( any < 4 ) {
+			continue;
+		}
+		// Larger areas get a glaze sized to fit (a drop or a brush wash) ...
+		const covered = new Uint8Array( N );
+		const discs = packDiscs( mask, depthInside( mask, W, H, B ), covered, { W, H, maxR: B * 0.06, minR: B * 0.03, jitter: 0.2, seam, rng, limit: 40 } );
+		for ( const d of discs ) {
+			const i = Math.round( d.y ) * W + Math.round( d.x );
+			pieces.push( {
+				type: 'wash',
+				k,
+				x: d.x,
+				y: d.y,
+				r: d.fit / 1.25,
+				fit: d.fit,
+				level: 0,
+				amount: 0.85,
+				water: rng.range( 0.35, 0.55 ),
+				chaos: 0.15,
+				seed: rng.u32(),
+				mass: Tk[ i ] * importance[ i ] * d.fit * d.fit,
+				hand: 0.4 + d.fit / ( B * 0.06 ),
+			} );
+		}
+		// ... and what remains is painted along its centreline.
+		const rest = ( i ) => mask[ i ] && ! covered[ i ];
 		seen.fill( 0 );
 		for ( let s0 = 0; s0 < N; s0++ ) {
-			if ( seen[ s0 ] || ! gap( s0 ) ) {
+			if ( seen[ s0 ] || ! rest( s0 ) ) {
 				continue;
 			}
 			let sp = 0;
 			stack[ sp++ ] = s0;
 			seen[ s0 ] = 1;
 			const cells = [];
+			let mass = 0;
 			while ( sp > 0 ) {
 				const i = stack[ --sp ];
 				cells.push( i );
+				mass += Tk[ i ] * importance[ i ];
 				const x = i % W;
 				const y = ( i / W ) | 0;
-				if ( x > 0 && ! seen[ i - 1 ] && gap( i - 1 ) ) {
-					seen[ i - 1 ] = 1;
-					stack[ sp++ ] = i - 1;
-				}
-				if ( x < W - 1 && ! seen[ i + 1 ] && gap( i + 1 ) ) {
-					seen[ i + 1 ] = 1;
-					stack[ sp++ ] = i + 1;
-				}
-				if ( y > 0 && ! seen[ i - W ] && gap( i - W ) ) {
-					seen[ i - W ] = 1;
-					stack[ sp++ ] = i - W;
-				}
-				if ( y < H - 1 && ! seen[ i + W ] && gap( i + W ) ) {
-					seen[ i + W ] = 1;
-					stack[ sp++ ] = i + W;
+				const nb = [ x > 0 ? i - 1 : -1, x < W - 1 ? i + 1 : -1, y > 0 ? i - W : -1, y < H - 1 ? i + W : -1 ];
+				for ( const j2 of nb ) {
+					if ( j2 >= 0 && ! seen[ j2 ] && rest( j2 ) ) {
+						seen[ j2 ] = 1;
+						stack[ sp++ ] = j2;
+					}
 				}
 			}
 			if ( cells.length < 4 ) {
 				continue;
 			}
-			const groups = new Map();
-			for ( const i of cells ) {
-				const key = Math.floor( ( i % W ) / G ) + 4096 * Math.floor( ( ( i / W ) | 0 ) / G );
-				if ( ! groups.has( key ) ) {
-					groups.set( key, [] );
-				}
-				groups.get( key ).push( i );
-			}
-			for ( const part of groups.values() ) {
-				if ( part.length < 3 ) {
-					continue;
-				}
-				let sx = 0;
-				let sy = 0;
-				let sxx = 0;
-				let syy = 0;
-				let sxy = 0;
-				let mass = 0;
-				for ( const i of part ) {
-					const x = i % W;
-					const y = ( i / W ) | 0;
-					sx += x;
-					sy += y;
-					sxx += x * x;
-					syy += y * y;
-					sxy += x * y;
-					mass += Tk[ i ] * importance[ i ];
-				}
-				const n = part.length;
-				const mx = sx / n;
-				const my = sy / n;
-				const cxx = sxx / n - mx * mx;
-				const cyy = syy / n - my * my;
-				const cxy = sxy / n - mx * my;
-				const tr = cxx + cyy;
-				const disc = Math.sqrt( Math.max( 0, ( tr * tr ) / 4 - ( cxx * cyy - cxy * cxy ) ) );
-				const half = 2 * Math.sqrt( tr / 2 + disc ) + 1;
-				const width = 2 * Math.sqrt( Math.max( 0, tr / 2 - disc ) ) + 1;
-				const across = Math.max( 1.2, width * 1.1 );
+			const strokes = centrelineStrokes( cells, W );
+			for ( const st of strokes ) {
 				pieces.push( {
 					type: 'detail',
 					k,
-					x: mx,
-					y: my,
-					r: across,
-					rot: 0.5 * Math.atan2( 2 * cxy, cxx - cyy ),
-					aspect: Math.min( 3.5, Math.max( 1, ( half * 1.1 ) / across ) ),
+					x: st.x,
+					y: st.y,
+					r: st.r,
+					path: st.pts,
 					amount: 0.95,
 					water: rng.range( 0.1, 0.18 ),
-					flat: 0.05,
-					follow: 0.97,
 					level: 0,
-					chaos: 0.15,
+					chaos: 0.1,
 					requireDry: true,
 					seed: rng.u32(),
-					mass,
+					mass: mass / strokes.length,
+					hand: 0.55 + st.len / ( B * 0.3 ),
 				} );
 			}
 		}
 	}
 	bestT = null;
-	// Most visible gaps first, within what the hand can do in the window.
+	// Most visible gaps first, within the seconds the hand has in the window.
 	pieces.sort( ( a, b ) => b.mass - a.mass );
-	const chosen = pieces.slice( 0, budget );
+	const chosen = [];
+	let used = 0;
+	for ( const p of pieces ) {
+		if ( used + p.hand <= budget ) {
+			used += p.hand;
+			chosen.push( p );
+		}
+	}
 	// Group by colour (light to dark), each walked nearest-first.
 	const byK = new Map();
 	for ( const p of chosen ) {

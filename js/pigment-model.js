@@ -46,7 +46,9 @@ export class PigmentModel {
 		this.cap = new Float32Array( N );
 		for ( let i = 0; i < N; i++ ) {
 			// Masked (reserved) paper never takes water: washes flow around it.
-			this.cap[ i ] = reserve && reserve[ i ] ? 1e9 : 0.4 + 0.5 * paper[ i ];
+			// Dry paper wicks a little water from a wet neighbour, so adjacent washes
+			// knit together instead of leaving a pale seam.
+			this.cap[ i ] = reserve && reserve[ i ] ? 1e9 : 0.3 + 0.4 * paper[ i ];
 		}
 		this.reserve = reserve || new Uint8Array( N );
 		this.h = new Float32Array( N );

@@ -86,8 +86,33 @@ const smooth = ( a, b, x ) => {
 	return t * t * ( 3 - 2 * t );
 };
 
-/** Position of the brush tip along a back-and-forth wash, p in [0,1]. */
+/**
+ * Position of the brush tip at progress p in [0,1]: along a planned track
+ * (a centreline stroke), or back and forth across a wash.
+ */
 export function brushPath( a, p ) {
+	if ( a.track ) {
+		const t = a.track;
+		const n = t.length / 3;
+		let lo = 0;
+		let hi = n - 1;
+		while ( lo < hi - 1 ) {
+			const mid = ( lo + hi ) >> 1;
+			if ( t[ mid * 3 + 2 ] <= p ) {
+				lo = mid;
+			} else {
+				hi = mid;
+			}
+		}
+		const s0 = t[ lo * 3 + 2 ];
+		const s1 = t[ hi * 3 + 2 ];
+		const f = s1 > s0 ? Math.min( 1, Math.max( 0, ( p - s0 ) / ( s1 - s0 ) ) ) : 0;
+		return {
+			x: t[ lo * 3 ] + ( t[ hi * 3 ] - t[ lo * 3 ] ) * f,
+			y: t[ lo * 3 + 1 ] + ( t[ hi * 3 + 1 ] - t[ lo * 3 + 1 ] ) * f,
+			turn: 0,
+		};
+	}
 	const n = a.passes;
 	const q = Math.min( n - 1e-6, Math.max( 0, p * n ) );
 	const band = Math.floor( q );

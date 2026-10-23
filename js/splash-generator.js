@@ -303,6 +303,69 @@ export class SplashGenerator {
 	}
 
 	/**
+	 * A brush stroke along a planned centreline (letters, contours, gaps): the
+	 * tip follows the shape's spine and its width follows the shape.
+	 */
+	_brushAlong( rng, op, k, delay = 0 ) {
+		const anim = this.animator;
+		if ( anim && anim.brushFreeAt - this.now > 3 ) {
+			return null;
+		}
+		const pts = op.path;
+		const n = pts.length / 3;
+		let total = 0;
+		const cum = new Float32Array( n );
+		for ( let q = 1; q < n; q++ ) {
+			total += Math.hypot( pts[ q * 3 ] - pts[ q * 3 - 3 ], pts[ q * 3 + 1 ] - pts[ q * 3 - 2 ] );
+			cum[ q ] = total;
+		}
+		const path = new Float32Array( n * 4 );
+		const track = new Float32Array( n * 3 );
+		for ( let q = 0; q < n; q++ ) {
+			const x = pts[ q * 3 ];
+			const y = pts[ q * 3 + 1 ];
+			const s = total > 0 ? cum[ q ] / total : q / Math.max( 1, n - 1 );
+			// Pressure: lighter as the brush lands and lifts.
+			const u = n > 1 ? q / ( n - 1 ) : 0.5;
+			const press = 0.75 + 0.25 * Math.min( 1, u / 0.12, ( 1 - u ) / 0.12 );
+			const ok = k < 0 || this.belongs( k, x, y );
+			path[ q * 4 ] = x;
+			path[ q * 4 + 1 ] = y;
+			path[ q * 4 + 2 ] = Math.min( 0.9999, s );
+			path[ q * 4 + 3 ] = ok ? Math.max( 0.7, pts[ q * 3 + 2 ] * press ) : 0;
+			track[ q * 3 ] = x;
+			track[ q * 3 + 1 ] = y;
+			track[ q * 3 + 2 ] = s;
+		}
+		if ( k >= 0 ) {
+			this.loaded = k;
+		}
+		this.handX = pts[ ( n - 1 ) * 3 ];
+		this.handY = pts[ ( n - 1 ) * 3 + 1 ];
+		const blob = {
+			brush: true,
+			k,
+			level: op.level ?? 0,
+			amount: ( op.amount ?? 0.95 ) * rng.range( 0.92, 1.05 ),
+			water: ( op.water ?? 0.14 ) * rng.range( 0.9, 1.1 ),
+			minNeed: 0.01,
+			spill: 0,
+			seed: rng.u32(),
+			path,
+		};
+		const B = this.an.B;
+		const tip = op.r ?? 1.5;
+		const dur = Math.min( 2.6, 0.25 + total / ( B * 0.3 ) );
+		const approach = 0.08 + 0.14 * Math.min( 1, tip / ( B * 0.025 ) );
+		const start = anim ? Math.max( this.now + delay, anim.brushFreeAt + approach ) : 0;
+		if ( anim ) {
+			anim.brushFreeAt = start + dur + approach;
+		}
+		this._emit( blob, { tool: 'brush', mode: 'sweep', start, dur, approach, linger: approach, x: pts[ 0 ], y: pts[ 1 ], tip, track } );
+		return { start, dur };
+	}
+
+	/**
 	 * A drop falls, lands and blooms outward; heavier drops throw a crown of
 	 * satellite droplets (particles) that bloom where they land.
 	 */
@@ -456,6 +519,10 @@ export class SplashGenerator {
 
 			case 'detail':
 				if ( k < 0 ) {
+					return true;
+				}
+				if ( op.path ) {
+					this._brushAlong( rng, op, k );
 					return true;
 				}
 				// Detail is brushwork drawn along the contour, like a hairline.

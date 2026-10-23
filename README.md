@@ -70,9 +70,16 @@ animated hand; `?bench=1&benchSpeed=16&benchRt=20` runs the benchmark
      washes near borders, in three glazes (coarse → fine).
    - **The tip stays in its colour:** brush paths only touch paper where
      their colour belongs; a touch too short to be a stroke is skipped.
+   - **Centreline strokes:** fine work (letters, eyelids, contours, gaps)
+     follows each shape's spine: discs that fit the local width are chained
+     into brush paths along its curves, the tip widening and narrowing with
+     the shape, lifting between separate parts.
    - **Step-back passes** (55%, 80%, 93%): the painter compares the canvas
-     with the target and paints the gaps that are still bare with fine
-     strokes sized and oriented to each gap, colour by colour, nearest first.
+     with the target. Where a colour is still bare *or clearly too light*,
+     larger areas get a glaze sized to fit and the rest is painted along its
+     centreline, colour by colour, nearest first, within the hand's time.
+   - **Wicking:** dry paper next to a wet wash draws a little water, so
+     neighbouring washes knit together instead of leaving a pale seam.
 4. **Gestures in time.** Nothing is stamped instantly. Big masses arrive
    as heavy drops: the drop falls with a converging shadow, flattens on
    impact, and blooms radially into the shape of its region while a crown
