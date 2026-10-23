@@ -28,128 +28,49 @@ animated hand; `?bench=1&benchSpeed=16&benchRt=20` runs the benchmark
 
 ## Technical proposal
 
-### 1. Base algorithm: plan → gesture → simulate → evaluate → correct
+### 1. Painting method: layers of value, like a watercolourist
 
-1. **Analysis (worker).** Normalises the image to a working grid (280–448 px
-   long side) and builds a palette by k-means++ in OKLab. Each palette
-   colour becomes a *pigment* with a Beer–Lambert absorbance
-   `A_k = −ln(colour/paper)`. Each pixel's optical density is decomposed by
-   non-negative least squares over pairs of pigments (weighted by
-   transmittance), which yields one **target density map per pigment**,
-   blurred at three scales (fine, mid, coarse). The decomposition keeps
-   continuous tones, so quantisation never flattens the image into
-   posterised regions. **One target per tool size:** a broad gesture can
-   only be as precise as its tool, so its target is the fine target
-   *opened* at its own scale (erode, then dilate back): large areas keep
-   their full extent right up to their borders, while shapes narrower than
-   the tool are left out, and no gesture ever darkens past the final value.
-   Lettering and small shapes appear only when the fine brush paints them. The analysis also produces edge, detail, importance
-   (edge density, colour contrast, centre prior, detail), feature-scale and
-   darkness maps, plus a segmentation (labels → mode filter → connected
-   components).
-2. **Composition plan (worker).** A coarse-to-fine timeline of about 800–1,700
-   operations across 7 stages: large masses (big drops, light to dark
-   loosely) → silhouettes/structure (per-region washes) → secondary regions
-   → wet-in-wet transitions on soft borders → shadows & detail (dry-brush,
-   darks last) → splashes & accents → final drying. Positions are
-   importance-sampled from the relevant maps, never uniform. About 38% of
-   the slots are **correction slots** that are filled at runtime.
-3. **Gestures (controlled chaos).** Each op lands with a Gaussian offset
-   scaled by its size and the stage's chaos, and shrunk by up to 85% on
-   strong edges. Its shape is an irregular polar profile (random harmonics),
-   aspect and rotation, with ±15% amount variation. The **pigment amount
-   is driven by the remaining need** of its target map (`T_k − deposited −
-   suspended`), and the shape can follow where that need is. So randomness
-   changes *how* paint lands, never *whether* the subject gets painted.
-   Satellite droplets deposit only where they are needed, plus a small
-   decorative spatter allowance that is non-zero only in low-importance
-   areas. The pigment-mass rule above caps every stamp at the remaining
-   need, so pigment overshoot only comes from flow; dark mistakes are
-   corrected by lifting.
-3. **Two acts.** Act 1 (about the first 30%) is drops and splashes: every
-   object's colour is poured in as big drops sized to fit, with its other
-   colours charged in wet-in-wet. Act 2 is the brush, which cuts in, washes
-   and perfects whatever the drops left. A brush never pushes any cell past
-   the image's darkness there, counting all paint already present; water
-   spreading into dry paper carries little pigment (the front is mostly
-   clear), so dark washes do not bleed.
-3a. **Object by object, like a painter.** The big segmented areas (sky,
-   hair, face, coat) are the objects. They are painted biggest first (the
-   large masses), then light to dark, each in one go: a few big drops of
-   its colour are poured in, then the brush pulls them out: cut in the edge with one
-   continuous stroke that follows the contour (only where the image has a
-   real edge), then carry a *graded* wash across the inside in gently
-   wavering rows, top to bottom, with rounded turns, the tone following
-   what the image needs as the brush moves. Each wash deliberately runs a
-   little past its edge under the neighbours painted later (and into soft
-   borders), so the next, darker colour defines the edge and no white gaps
-   are left; the sheet edge is never a border. Secondary colours are
-   charged into the wet wash, and the next object is never one touching a
-   still-wet one. Every path is smoothed and evenly paced, like a hand.
-3b. **Nothing is ever trimmed to the image.** A drop is one tone with its
-   own ragged outline; a brush stroke paints exactly the ribbon its tip
-   sweeps. Fidelity comes from *planning*, as a painter's does:
-   - **Coverage planner:** each colour's area (where that pigment belongs)
-     is filled by packing gestures largest-first at the deepest uncovered
-     point, each sized so its whole footprint fits (plus a small seam so
-     neighbouring washes meet). Big drops land in open interiors, brush
-     washes near borders, in three glazes (coarse → fine).
-   - **The tip stays in its colour:** brush paths only touch paper where
-     their colour belongs; a touch too short to be a stroke is skipped.
-   - **Spine strokes:** fine work (letters, brows, eyelids, gaps) is painted
-     tip to tip in one stroke: the two points furthest apart *through* the
-     shape are found and the shortest path between them, which stays inside
-     it, becomes the stroke; its tip follows the local width; branches get
-     their own strokes. Shapes are found across colours (a brow mixing two
-     darks is one shape): the main pigment paints it and the other glazes
-     along the same spine. A shape is painted whole or not at all.
-   - **Step-back passes** (55%, 80%, 93%): the painter compares the canvas
-     with the target. Where a colour is still bare *or clearly too light*,
-     larger areas get a glaze sized to fit and the rest is painted along its
-     centreline, colour by colour, nearest first, within the hand's time.
-   - **Wicking:** dry paper next to a wet wash draws a little water, so
-     neighbouring washes knit together instead of leaving a pale seam.
-4. **Gestures in time.** Nothing is stamped instantly. Big masses arrive
-   as heavy drops: the drop falls with a converging shadow, flattens on
-   impact, and blooms radially into the shape of its region while a crown
-   of satellite droplets flies out on arcs and blooms where each lands.
-   Washes are painted by a round brush making back-and-forth passes, with
-   the paint revealed exactly behind the tip. Wet-in-wet transitions lay
-   clear water with the brush, then charge two pigments into it as drops.
-   Lifts are a clean damp brush blotting the spot. Gestures run on a real-time clock, so they keep
-   a natural pace at any playback speed; higher speed only makes the rain
-   of drops denser. The artist has one hand: brush strokes are queued, the
-   planner budgets detail and correction strokes to what one hand can paint
-   (about one per second), detail strokes follow the contour, and when the
-   hand is backed up the timeline waits rather than hurrying it.
-   **One colour at a time, nearest area next:** the timeline is cut into
-   sessions (duration / 8); each session works pigment by pigment, starting
-   with the colour already on the brush. Each colour's marks are walked as
-   a route from where the brush is (nearest first, then a 2-opt pass to
-   uncross it), so the brush moves to the closest area needing that colour
-   instead of jumping across the sheet. Corrections only use the colour on
-   the brush and pick the nearest spot that needs it.
-   **Detail is painted shape by shape:** for each colour, the leftover the
-   washes could not give (fine target − opened target: a letter, a sliver of
-   blue around a white letter, an eyelid) is found as connected shapes, and
-   each gets one or more near-dry strokes sized and oriented to it
-   (principal axes), most visible first, within the hand budget. Small
-   whites next to edges are reserved with **masking fluid** (no water or
-   pigment enters them), as a painter masks white lettering.
-   A **Fine detail** setting (Soft → Maximum) raises the grid resolution
-   (300 → 800 px) and the number and fineness of detail strokes.
-   **Borders stay clean:** splashes land only in the background, satellite
-   droplets stay inside their parent's colour area, blooms and lifts never
-   happen near an edge, and single droplets are reserved for genuinely
-   small features.
-5. **Simulation.** A simplified Curtis et al. (1997) model on a CPU grid
-   (see the research basis below). Wet paint flows while it is being
-   placed.
-6. **Evaluation and correction.** A worker scores the current densities against
-   the reference (see §4) and returns an error map. Correction slots
-   importance-sample that map (errors under ~3.5 ΔE are ignored, and wet
-   areas are down-weighted). They paint with the pigment that best reduces
-   the residual, or *lift* where the painting went too dark.
+The painting is built the way a watercolourist works, in layers of value
+across the whole sheet. Each layer is planned (in a worker) when the painter
+reaches it, from what is actually on the paper. The painting clock pauses
+for that moment of stepping back.
+
+0. **Read the values.** Analysis (worker) finds a limited palette (k-means++
+   in OKLab), decomposes every pixel into pigment amounts (Beer–Lambert,
+   non-negative least squares over pigment pairs), and finds the big areas,
+   real edges, and the thin whites to mask (lettering, highlights).
+1. **First wash: light and loose.** Every big area, biggest first, gets its
+   lightest version: big drops poured in (sized to fit), spread with a broad
+   wet brush, its other colours dropped in while wet, plus a few splashes.
+2. **Mid-tones, shape by shape.** One colour at a time (biggest colour
+   first), nearest shape next. One confident wash per shape: cut in along
+   real edges with one continuous stroke, then gently wavering rows top to
+   bottom with rounded turns.
+3. **Shadow glazes.** The same pigments again, only over the parts that
+   should be darker (the shadow masses), so values build in steps and a few
+   pigments make gradients. Edges are not retraced.
+4. **Darks and details.** A small brush for thin or small shapes, ranked by
+   how important and dark they are (eyes, brows, lettering first). Each is
+   one stroke from tip to tip along the shape's spine; a pupil gets a short
+   touch.
+5. **Finish.** Lift a highlight or two where the paper went too dark.
+
+Each layer has its own **value target**: the image with every cell's
+pigment mix scaled so it is no darker than the layer's value (light, then
+mid, then shadow masses, then everything). The pigment model enforces it
+per cell, counting all paint already there, so a gesture can only bring
+the paper up to the layer's value, never past it. Nothing is trimmed to the
+image: drops are one tone with their own ragged outline, brush strokes paint
+exactly the ribbon the tip sweeps, and gestures are sized and placed so they
+fit. Water spreading into dry paper carries little pigment, so washes do not
+bleed. The brush never mimes: a stroke with nothing to paint is skipped
+before it is drawn. If a layer would not fit its time, the most important
+shapes are kept; a layer that starts late is compressed into the time left.
+
+**Simulation.** This is a simplified Curtis et al. (1997) model on a CPU
+grid (see the research basis below). Only wet tiles are simulated. Water
+flow, pigment advection and diffusion, rim evaporation (edge darkening),
+granulation and backruns all emerge from it.
 
 ### 2. Rendering architecture
 

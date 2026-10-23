@@ -69,6 +69,7 @@ const animation = new AnimationController( {
 	renderer,
 	adaptive,
 	evaluate: ( D ) => call( 'evaluate', { D: D.buffer }, [ D.buffer ] ),
+	planLayer: ( msg, transfer ) => call( 'planLayer', msg, transfer ),
 	onStats: updateHud,
 	onDone: handleDone,
 } );
@@ -412,11 +413,8 @@ async function analyze() {
 		} );
 		$( 'swatches' ).appendChild( d );
 	} );
-	const types = Object.entries( r.plan.byType )
-		.map( ( [ k, v ] ) => `${ v } ${ k }` )
-		.join( ' · ' );
 	$( 'planInfo' ).textContent =
-		`Plan: ${ r.plan.ops.length } operations over ${ fmt( duration ) } (${ types }). ` +
+		`Plan: ${ r.plan.layers.length } layers over ${ fmt( duration ) } (${ r.plan.layers.map( ( l ) => l.name.toLowerCase() ).join( ' → ' ) }), each planned from the paper as it is. ` +
 		`Analysis ${ Math.round( r.timings.analysis ) } ms, planning ${ Math.round( r.timings.plan ) } ms in a worker. ` +
 		`Palette fidelity ΔE ${ an.stats.paletteDE.toFixed( 1 ) }; blank-paper similarity ${ r.baseline.scores.similarity.toFixed( 1 ) }.`;
 	$( 'time' ).textContent = `0:00 / ${ fmt( duration ) }`;

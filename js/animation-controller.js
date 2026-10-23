@@ -17,10 +17,11 @@ import { STAGES, stageAt, planGapStrokes } from './composition-planner.js';
 const BASE_DT = 1 / 30; // painting seconds per simulation step
 
 export class AnimationController {
-	constructor( { renderer, adaptive, evaluate, onStats, onDone } ) {
+	constructor( { renderer, adaptive, evaluate, planLayer, onStats, onDone } ) {
 		this.renderer = renderer;
 		this.adaptive = adaptive;
 		this.evaluate = evaluate;
+		this.planLayer = planLayer;
 		this.onStats = onStats;
 		this.onDone = onDone;
 		this.state = 'idle';
@@ -57,10 +58,16 @@ export class AnimationController {
 		this.lastEvalReal = 0;
 		this.lastScores = null;
 		this.finishing = false;
-		// Step-back passes: moments when the painter looks at the sheet and
-		// fills what is still bare.
-		this.gapPasses = [ 0.6, 0.88 ];
+		// The layered method replaces step-back passes and corrections.
+		this.gapPasses = [];
 		this.gapStrokes = 0;
+		// Layers: each planned when the painter reaches it, from the paper.
+		this.layerIdx = 0;
+		this.layerPending = false;
+		this.layerOps = 0;
+		this.epoch = ( this.epoch || 0 ) + 1;
+		this.layerName = 'Reading the values';
+		this.model.setLayer( null );
 		this.state = 'ready';
 		this.adaptive.reset();
 		this.renderer.needsDraw = true;
@@ -294,11 +301,50 @@ export class AnimationController {
 		this.gapStrokes += ops.length;
 	}
 
+	/**
+	 * Step up to the next layer when its time comes and the previous layer's
+	 * strokes are done: snapshot the paper and have the worker plan it.
+	 */
+	_maybeNextLayer() {
+		const layers = this.plan.layers;
+		if ( ! layers || this.layerPending || this.layerIdx >= layers.length ) {
+			return;
+		}
+		const L = layers[ this.layerIdx ];
+		const handFree = this.animator.brushFreeAt - this.animator.clock < 0.5;
+		if ( this.simTime < L.t0 * this.duration || this.deferred.length || ! handFree ) {
+			return;
+		}
+		this.layerPending = true;
+		const idx = this.layerIdx;
+		const cur = this.model.snapshotPigment();
+		const epoch = this.epoch = ( this.epoch || 0 ) + 1;
+		this.planLayer( { layer: idx, cur: cur.buffer, handX: this.splash.handX, handY: this.splash.handY, seed: idx }, [ cur.buffer ] ).then( ( res ) => {
+			if ( epoch !== this.epoch ) {
+				return; // restarted meanwhile
+			}
+			this.model.setLayer( res.target, res.dens );
+			const base = this.simTime;
+			// If this layer starts late, fit its gestures into the time it has
+			// left, so later layers are never pushed past the end.
+			const span = res.ops.length ? res.ops[ res.ops.length - 1 ].t : 0;
+			const avail = Math.max( 0.04 * this.duration, L.t1 * this.duration - base );
+			const squeeze = span > avail ? avail / span : 1;
+			for ( const op of res.ops ) {
+				op.t = base + op.t * squeeze;
+				op.stage = idx;
+				this.deferred.push( op );
+			}
+			this.layerName = L.name;
+			this.layerIdx = idx + 1;
+			this.layerPending = false;
+			this.layerOps = ( this.layerOps || 0 ) + res.ops.length;
+		} );
+	}
+
 	_simulate( frameStart ) {
 		const q = this.adaptive.q;
-		if ( this.gapPasses.length && this.simTime >= this.gapPasses[ 0 ] * this.duration ) {
-			this._stepBack();
-		}
+		this._maybeNextLayer();
 		const deadline = frameStart + q.simBudget;
 		const ops = this.plan.ops;
 		const dt = BASE_DT * this.adaptive.dtScale;
@@ -379,11 +425,13 @@ export class AnimationController {
 		if ( painting ) {
 			const dtReal = Math.min( dtMs, 100 ) / 1000;
 			this.animator.tick( dtReal );
-			// The hand never hurries: while brushwork is backed up, the timeline waits.
+			// The hand never hurries: while brushwork is backed up, the timeline
+			// waits; it also waits while the painter steps back to plan a layer.
 			const handBusy = this.animator.brushFreeAt - this.animator.clock > 2.5;
-			const dtPaint = handBusy ? 0 : dtReal * this.speed;
+			const dtPaint = handBusy || this.layerPending ? 0 : dtReal * this.speed;
 			const atEnd = this.simTime >= this.duration - BASE_DT * this.adaptive.dtScale;
-			const planDone = this.cursor >= this.plan.ops.length && 0 === this.deferred.length && ! this.animator.busy && ! this.gapPasses.length;
+			const layersDone = ! this.plan.layers || ( this.layerIdx >= this.plan.layers.length && ! this.layerPending );
+			const planDone = this.cursor >= this.plan.ops.length && 0 === this.deferred.length && ! this.animator.busy && layersDone;
 			if ( atEnd && planDone ) {
 				this.finishing = true;
 			}
@@ -421,18 +469,19 @@ export class AnimationController {
 	stats() {
 		const u = Math.min( 1, this.simTime / this.duration );
 		const stage = 'done' === this.state ? STAGES.length - 1 : stageAt( u );
+		const layered = !! this.plan.layers;
 		return {
 			state: this.state,
 			simTime: Math.min( this.simTime, this.duration ),
 			duration: this.duration,
 			progress: 'done' === this.state ? 1 : u * 0.995,
-			stage: STAGES[ stage ].name,
+			stage: layered ? ( 'done' === this.state ? 'Finished' : this.finishing ? 'Drying' : this.layerName ) : STAGES[ stage ].name,
 			fps: this.adaptive.fps,
 			level: this.adaptive.level,
 			dtScale: this.adaptive.dtScale,
 			ema: this.adaptive.ema,
 			executed: this.executed,
-			total: this.plan.ops.length,
+			total: this.plan.ops.length + ( this.layerOps || 0 ),
 			cursor: this.cursor,
 			deferred: this.deferred.length,
 			wet: this.drying.summary( this.model ),

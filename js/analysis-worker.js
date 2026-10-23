@@ -4,11 +4,14 @@
  */
 
 import { analyzeImage, pixelsToLabLinear } from './image-analyzer.js';
-import { planComposition } from './composition-planner.js';
+import { LAYERS, layerContext, planLayer } from './layer-planner.js';
 import { SimilarityEvaluator } from './similarity-evaluator.js';
 import { makePaperTexture } from './noise.js';
 
 let evaluator = null;
+// Image-only context kept in the worker so each layer can be planned
+// against the paper as it is when the painter reaches it.
+let layerCtx = null;
 
 self.onmessage = ( e ) => {
 	const msg = e.data;
@@ -32,8 +35,19 @@ self.onmessage = ( e ) => {
 					remap: msg.remap || [],
 				} );
 				const t1 = performance.now();
-				const plan = planComposition( an, { duration: msg.duration, seed: msg.seed, fineDetail: msg.detail } );
+				// The worker keeps its own copies of what layer planning reads; the
+				// originals are transferred to the main thread below.
+				const ctxAn = {
+					...an,
+					T: [ an.T[ 0 ].map( ( m ) => m.slice() ) ],
+					importance: an.importance.slice(),
+					reserve: an.reserve.slice(),
+					room: an.room.slice(),
+				};
+				layerCtx = layerContext( ctxAn, { duration: msg.duration, seed: msg.seed, fineDetail: msg.detail } );
+				const plan = { ops: [], layers: LAYERS, duration: msg.duration, byType: {}, layered: true };
 				const t2 = performance.now();
+				plan.planMs = t2 - t1;
 				const ref = pixelsToLabLinear( new Uint8ClampedArray( msg.refPixels ), msg.refW * msg.refH );
 				evaluator = new SimilarityEvaluator( {
 					W: an.W,
@@ -67,6 +81,11 @@ self.onmessage = ( e ) => {
 					},
 					transfer
 				);
+				break;
+			}
+			case 'planLayer': {
+				const res = planLayer( layerCtx, msg.layer, { cur: new Float32Array( msg.cur ), handX: msg.handX, handY: msg.handY, seed: msg.seed } );
+				reply( res, [ res.target.buffer, res.dens.buffer ] );
 				break;
 			}
 			case 'evaluate': {

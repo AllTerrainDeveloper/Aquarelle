@@ -119,6 +119,8 @@ export class PigmentModel {
 		this.wetCells = 0;
 		this.activeTiles = 0;
 		this.dryZones = [];
+		this.layerT = null;
+		this.layerDens = null;
 	}
 
 	/** Local accelerated drying (only where the brush must return soon). */
@@ -161,13 +163,49 @@ export class PigmentModel {
 		this.dryZones.length = w;
 	}
 
+	/**
+	 * Paint toward a layer's value target instead of the final image (the
+	 * layered method): `target` is K*N pigment amounts, `dens` the per-cell
+	 * darkness ceiling. Pass null to go back to the final image.
+	 */
+	setLayer( target, dens ) {
+		if ( ! target ) {
+			this.layerT = null;
+			this.layerDens = null;
+			return;
+		}
+		this.layerT = [];
+		for ( let k = 0; k < this.K; k++ ) {
+			this.layerT.push( target.subarray( k * this.N, ( k + 1 ) * this.N ) );
+		}
+		this.layerDens = dens;
+	}
+
+	_T( level, k ) {
+		return this.layerT ? this.layerT[ k ] : this.T[ level ][ k ];
+	}
+
+	/** Pigment on paper (deposited + suspended), K*N, for planning a layer. */
+	snapshotPigment() {
+		const out = new Float32Array( this.K * this.N );
+		for ( let k = 0; k < this.K; k++ ) {
+			const d = this.d[ k ];
+			const g = this.g[ k ];
+			const off = k * this.N;
+			for ( let i = 0; i < this.N; i++ ) {
+				out[ off + i ] = d[ i ] + g[ i ];
+			}
+		}
+		return out;
+	}
+
 	tileOf( x, y ) {
 		return ( ( y / TS ) | 0 ) * this.TX + ( ( x / TS ) | 0 );
 	}
 
 	/** Remaining need of pigment k at cell i for a target level. */
 	need( k, level, i ) {
-		return this.T[ level ][ k ][ i ] - this.d[ k ][ i ] - this.g[ k ][ i ];
+		return this._T( level, k )[ i ] - this.d[ k ][ i ] - this.g[ k ][ i ];
 	}
 
 	/* ------------------------------------------------------------------ */
@@ -225,7 +263,7 @@ export class PigmentModel {
 			// Tone for the whole stroke: what the area under the path still needs.
 			// Graded washes judge against dried paint only, so fresh drops poured
 			// just before do not cancel the wash meant to spread them.
-			const Tk = this.T[ b.level ][ b.k ];
+			const Tk = this._T( b.level, b.k );
 			let sum = 0;
 			let pos = 0;
 			let n = 0;
@@ -253,7 +291,7 @@ export class PigmentModel {
 		if ( g.x0 > g.x1 || g.y0 > g.y1 ) {
 			return false;
 		}
-		const Tk = this.T[ b.level ][ b.k ];
+		const Tk = this._T( b.level, b.k );
 		const gk = this.g[ b.k ];
 		const dk = this.d[ b.k ];
 		let sumM = 0;
@@ -305,7 +343,7 @@ export class PigmentModel {
 		const meanNeed = b.meanNeed;
 		// The target at this gesture's scale (eroded and softened for broad
 		// tools, so they never stencil fine shapes nor overshoot them).
-		const Tk = k >= 0 ? this.T[ b.level ][ k ] : null;
+		const Tk = k >= 0 ? this._T( b.level, k ) : null;
 		const gk = k >= 0 ? this.g[ k ] : null;
 		const dk = k >= 0 ? this.d[ k ] : null;
 		const sweep = 'sweep' === mode;
@@ -368,8 +406,17 @@ export class PigmentModel {
 				if ( k >= 0 ) {
 					const nd = Math.max( 0, Tk[ i ] - dk[ i ] - gk[ i ] );
 					if ( b.uniform ) {
-						// A drop: one tone, its own organic outline, wherever the water goes.
-						const add = b.amount * meanNeed * ( 0.92 + 0.16 * n ) * m;
+						// A drop: one tone, its own organic outline, wherever the water goes
+						// (but never past the current layer's value at any cell).
+						let add = b.amount * meanNeed * ( 0.92 + 0.16 * n ) * m;
+						let have = 0;
+						for ( let q = 0; q < this.K; q++ ) {
+							have += ( this.d[ q ][ i ] + this.g[ q ][ i ] ) * this.meanA[ q ];
+						}
+						const room = ( ( this.layerDens || this.targetDens )[ i ] - have ) / Math.max( 0.05, this.meanA[ k ] );
+						if ( add > room ) {
+							add = room > 0 ? room : 0;
+						}
 						gk[ i ] += add;
 						total += add;
 						if ( b.water > 0 ) {
@@ -472,7 +519,7 @@ export class PigmentModel {
 				const ci = Math.min( H - 1, Math.max( 0, Math.round( cy ) ) ) * W + Math.min( W - 1, Math.max( 0, Math.round( cx ) ) );
 				// Against dried paint only: the stroke's own fresh (suspended) paint
 				// must not make its leading edge think the job is already done.
-				tone = Math.max( b.amount * Math.max( 0, this.T[ b.level ][ k ][ ci ] - this.d[ k ][ ci ] ), b.toneFloor || 0 );
+				tone = Math.max( b.amount * Math.max( 0, this._T( b.level, k )[ ci ] - this.d[ k ][ ci ] ), b.toneFloor || 0 );
 			}
 			// Stroke direction here (for bristle streaks across it).
 			const jp = Math.max( 0, j - 4 );
@@ -549,7 +596,7 @@ export class PigmentModel {
 						for ( let q = 0; q < this.K; q++ ) {
 							have += ( this.d[ q ][ i ] + this.g[ q ][ i ] ) * this.meanA[ q ];
 						}
-						const room = ( this.targetDens[ i ] - have ) / Math.max( 0.05, this.meanA[ k ] );
+						const room = ( ( this.layerDens || this.targetDens )[ i ] - have ) / Math.max( 0.05, this.meanA[ k ] );
 						if ( add > room ) {
 							add = room > 0 ? room : 0;
 						}
