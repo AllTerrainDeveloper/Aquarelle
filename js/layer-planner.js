@@ -88,7 +88,9 @@ function layerTarget( ctx, layer ) {
 			} else if ( 1 === layer ) {
 				v = t0[ i ] * Math.min( 1, V_MID / Math.max( 1e-3, D[ i ] ) );
 			} else if ( 2 === layer ) {
-				v = Math.max( shadow[ k ][ i ], t0[ i ] * Math.min( 1, V_MID / Math.max( 1e-3, D[ i ] ) ) );
+				// A photo's darks are big areas (foliage, silhouettes): its glazes
+				// take them to full depth; the detail brush only handles small things.
+				v = an.photo ? t0[ i ] : Math.max( shadow[ k ][ i ], t0[ i ] * Math.min( 1, V_MID / Math.max( 1e-3, D[ i ] ) ) );
 			} else {
 				v = t0[ i ];
 			}
@@ -647,6 +649,10 @@ export function planLayer( ctx, layer, state ) {
 			if ( ! strokes.length || ( len < B * 0.02 && ( cells.length < 5 || ( avgImp < 0.45 && avgNeed < 0.4 ) ) ) ) {
 				return;
 			}
+			// In a photo a lone speck reads as a stray dot, not as detail.
+			if ( an.photo && len < B * 0.012 && avgImp < 0.6 ) {
+				return;
+			}
 			// Only details here: thin or small shapes. Big leftovers belong to
 			// the glazes, not to the small brush.
 			if ( rr >= B * 0.02 && cells.length > ( B * 0.06 ) ** 2 ) {
@@ -668,7 +674,10 @@ export function planLayer( ctx, layer, state ) {
 		// painted as their own shapes, each with its own colour.
 		const owner = new Int16Array( N );
 		const sub = new Uint8Array( N );
-		for ( const cells of components( mask, W, H, 5 ) ) {
+		// A photo's thin structures (a ladder's rails) arrive in fragments:
+		// bridge the gaps so each is painted as one line, not a row of dots.
+		const detailMask = an.photo ? closeMask( mask, W, H, Math.max( 1, Math.round( B / 400 ) ), reserve ) : mask;
+		for ( const cells of components( detailMask, W, H, 5 ) ) {
 			const total = new Float64Array( K );
 			for ( const i of cells ) {
 				let best = -1;
@@ -678,6 +687,16 @@ export function planLayer( ctx, layer, state ) {
 					if ( n > bn ) {
 						bn = n;
 						best = k;
+					}
+				}
+				if ( best < 0 ) {
+					// A bridged gap: it takes the colour its spot calls for.
+					let bt = 0;
+					for ( let k = 0; k < K; k++ ) {
+						if ( ! pigments[ k ].isPaper && target[ k * N + i ] > bt ) {
+							bt = target[ k * N + i ];
+							best = k;
+						}
 					}
 				}
 				owner[ i ] = best;

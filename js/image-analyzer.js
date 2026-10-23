@@ -129,45 +129,61 @@ function chamferInside( mask, W, H ) {
 }
 
 /** Separable local extremum with a square window of radius r. */
-function rankFilter( src, W, H, r, pick ) {
-	const tmp = new Float32Array( src.length );
-	const out = new Float32Array( src.length );
-	for ( let y = 0; y < H; y++ ) {
-		const row = y * W;
-		for ( let x = 0; x < W; x++ ) {
-			let m = src[ row + x ];
-			const x0 = Math.max( 0, x - r );
-			const x1 = Math.min( W - 1, x + r );
-			for ( let k = x0; k <= x1; k++ ) {
-				m = pick( m, src[ row + k ] );
-			}
-			tmp[ row + x ] = m;
+/**
+ * Running min/max over a window of 2r+1 samples along one line (van Herk /
+ * Gil-Werman): three comparisons per sample whatever the radius.
+ * Reads n samples of src from o0 with stride st, writes dst the same way.
+ */
+function runLine( src, dst, o0, st, n, r, isMax, g, h ) {
+	const w = 2 * r + 1;
+	const get = ( i ) => src[ o0 + Math.min( n - 1, Math.max( 0, i ) ) * st ];
+	// Pad by r on both sides (edge values), in blocks of w.
+	const len = n + 2 * r;
+	for ( let i = 0; i < len; i++ ) {
+		const v = get( i - r );
+		if ( 0 === i % w ) {
+			g[ i ] = v;
+		} else {
+			g[ i ] = isMax ? Math.max( g[ i - 1 ], v ) : Math.min( g[ i - 1 ], v );
 		}
 	}
-	for ( let x = 0; x < W; x++ ) {
-		for ( let y = 0; y < H; y++ ) {
-			let m = tmp[ y * W + x ];
-			const y0 = Math.max( 0, y - r );
-			const y1 = Math.min( H - 1, y + r );
-			for ( let k = y0; k <= y1; k++ ) {
-				m = pick( m, tmp[ k * W + x ] );
-			}
-			out[ y * W + x ] = m;
+	for ( let i = len - 1; i >= 0; i-- ) {
+		const v = get( i - r );
+		if ( i === len - 1 || ( i + 1 ) % w === 0 ) {
+			h[ i ] = v;
+		} else {
+			h[ i ] = isMax ? Math.max( h[ i + 1 ], v ) : Math.min( h[ i + 1 ], v );
 		}
+	}
+	for ( let x = 0; x < n; x++ ) {
+		// The window over padded indices x .. x + 2r.
+		const a = h[ x ];
+		const b = g[ x + 2 * r ];
+		dst[ o0 + x * st ] = isMax ? ( a > b ? a : b ) : ( a < b ? a : b );
+	}
+}
+
+function rankFilter( src, W, H, r, isMax ) {
+	const tmp = new Float32Array( src.length );
+	const out = new Float32Array( src.length );
+	const L = Math.max( W, H ) + 2 * r + 1;
+	const g = new Float32Array( L );
+	const h = new Float32Array( L );
+	for ( let y = 0; y < H; y++ ) {
+		runLine( src, tmp, y * W, 1, W, r, isMax, g, h );
+	}
+	for ( let x = 0; x < W; x++ ) {
+		runLine( tmp, out, x, W, H, r, isMax, g, h );
 	}
 	return out;
 }
 
-/** Dilation (local maximum). */
 export function maxFilter( src, W, H, r ) {
-	return rankFilter( src, W, H, r, Math.max );
+	return rankFilter( src, W, H, r, true );
 }
-
-/** Erosion (local minimum) with a square window of radius r. */
 export function minFilter( src, W, H, r ) {
-	return rankFilter( src, W, H, r, Math.min );
+	return rankFilter( src, W, H, r, false );
 }
-
 export function percentile( arr, p ) {
 	const step = Math.max( 1, Math.floor( arr.length / 20000 ) );
 	const s = [];
@@ -338,23 +354,34 @@ export function textureScore( lab, W, H ) {
 }
 
 /**
+ * A round Gaussian kernel of radius r taps, its taps `step` cells apart:
+ * [dx, dy, weight, ...].
+ */
+function sparseKernel( r, step ) {
+	const ss = 2 * ( r * 0.8 ) ** 2;
+	const out = [];
+	for ( let dy = -r; dy <= r; dy++ ) {
+		for ( let dx = -r; dx <= r; dx++ ) {
+			if ( dx * dx + dy * dy <= r * r ) {
+				out.push( dx * step, dy * step, Math.exp( -( dx * dx + dy * dy ) / ss ) );
+			}
+		}
+	}
+	return out;
+}
+
+/**
  * Simplifies a photograph into the shapes a painter would see: repeated
  * edge-preserving (bilateral) smoothing in OKLab flattens texture and noise
  * inside areas while keeping the edges between them. Updates lab and lin.
  */
 function simplifyPhoto( lab, lin, W, H, B ) {
 	const N = W * H;
-	const r = Math.max( 2, Math.round( B / 140 ) );
-	const ss = 2 * ( r * 0.8 ) ** 2;
+	// The texture to flatten has a size relative to the picture: the filter
+	// spans ~B/140 cells, sampled sparsely so its cost per cell is the same
+	// at every Detail setting.
+	const spatial = sparseKernel( 3, Math.max( 1, Math.round( B / 400 ) ) );
 	const sr = 2 * 0.05 ** 2;
-	const spatial = [];
-	for ( let dy = -r; dy <= r; dy++ ) {
-		for ( let dx = -r; dx <= r; dx++ ) {
-			if ( dx * dx + dy * dy <= r * r ) {
-				spatial.push( dx, dy, Math.exp( -( dx * dx + dy * dy ) / ss ) );
-			}
-		}
-	}
 	let src = lab;
 	let dst = new Float32Array( N * 3 );
 	for ( let iter = 0; iter < 4; iter++ ) {
@@ -409,46 +436,47 @@ function simplifyPhoto( lab, lin, W, H, B ) {
  * Used on a photograph's pigment maps so each colour forms continuous areas
  * instead of a per-pixel speckle of alternating mixes.
  */
-function smoothInShapes( fields, lab, W, H, r, sigmaR, iterations ) {
-	const ss = 2 * ( r * 0.8 ) ** 2;
+function smoothInShapes( fields, lab, W, H, r, step, sigmaR, iterations ) {
+	const N = W * H;
+	const F = fields.length;
 	const sr = 2 * sigmaR * sigmaR;
-	const offs = [];
-	for ( let dy = -r; dy <= r; dy++ ) {
-		for ( let dx = -r; dx <= r; dx++ ) {
-			if ( dx * dx + dy * dy <= r * r ) {
-				offs.push( dx, dy, Math.exp( -( dx * dx + dy * dy ) / ss ) );
-			}
-		}
-	}
-	const tmp = new Float32Array( W * H );
-	for ( const f of fields ) {
-		for ( let iter = 0; iter < iterations; iter++ ) {
-			for ( let y = 0; y < H; y++ ) {
-				for ( let x = 0; x < W; x++ ) {
-					const i = y * W + x;
-					const l0 = lab[ i * 3 ];
-					const a0 = lab[ i * 3 + 1 ];
-					const b0 = lab[ i * 3 + 2 ];
-					let sw = 0;
-					let sv = 0;
-					for ( let s = 0; s < offs.length; s += 3 ) {
-						const xx = x + offs[ s ];
-						const yy = y + offs[ s + 1 ];
-						if ( xx < 0 || yy < 0 || xx >= W || yy >= H ) {
-							continue;
-						}
-						const j = yy * W + xx;
-						const dl = lab[ j * 3 ] - l0;
-						const da = lab[ j * 3 + 1 ] - a0;
-						const db = lab[ j * 3 + 2 ] - b0;
-						const w = offs[ s + 2 ] * Math.exp( -( dl * dl + da * da + db * db ) / sr );
-						sw += w;
-						sv += w * f[ j ];
+	const offs = sparseKernel( r, step );
+	// Weights depend only on the guide image: computed once per cell and
+	// applied to every field.
+	const out = fields.map( () => new Float32Array( N ) );
+	const acc = new Float64Array( F );
+	for ( let iter = 0; iter < iterations; iter++ ) {
+		for ( let y = 0; y < H; y++ ) {
+			for ( let x = 0; x < W; x++ ) {
+				const i = y * W + x;
+				const l0 = lab[ i * 3 ];
+				const a0 = lab[ i * 3 + 1 ];
+				const b0 = lab[ i * 3 + 2 ];
+				let sw = 0;
+				acc.fill( 0 );
+				for ( let s = 0; s < offs.length; s += 3 ) {
+					const xx = x + offs[ s ];
+					const yy = y + offs[ s + 1 ];
+					if ( xx < 0 || yy < 0 || xx >= W || yy >= H ) {
+						continue;
 					}
-					tmp[ i ] = sv / sw;
+					const j = yy * W + xx;
+					const dl = lab[ j * 3 ] - l0;
+					const da = lab[ j * 3 + 1 ] - a0;
+					const db = lab[ j * 3 + 2 ] - b0;
+					const w = offs[ s + 2 ] * Math.exp( -( dl * dl + da * da + db * db ) / sr );
+					sw += w;
+					for ( let f = 0; f < F; f++ ) {
+						acc[ f ] += w * fields[ f ][ j ];
+					}
+				}
+				for ( let f = 0; f < F; f++ ) {
+					out[ f ][ i ] = acc[ f ] / sw;
 				}
 			}
-			f.set( tmp );
+		}
+		for ( let f = 0; f < F; f++ ) {
+			fields[ f ].set( out[ f ] );
 		}
 	}
 }
@@ -710,7 +738,7 @@ export function analyzeImage( { width: W, height: H, pixels, K: K0, seed, exclud
 	}
 	if ( photo ) {
 		// A photo's mixes flip from pixel to pixel; let each colour form areas.
-		smoothInShapes( T0, lab, W, H, Math.max( 2, Math.round( B / 100 ) ), 0.08, 2 );
+		smoothInShapes( T0, lab, W, H, 4, Math.max( 1, Math.round( B / 400 ) ), 0.08, 2 );
 	}
 	mark( 'decomposition' );
 
