@@ -255,10 +255,10 @@ async function analyze() {
 	if ( animation.state !== 'idle' ) {
 		animation.state = 'idle';
 	}
-	for ( const id of [ 'start', 'quick', 'restart', 'exportPng', 'record' ] ) {
+	for ( const id of [ 'start', 'quick', 'realtime', 'restart', 'exportPng', 'record' ] ) {
 		$( id ).disabled = true;
 	}
-	animation.setTimelapse( 0 );
+	animation.setMode( 'paint' );
 	const [ sw, sh ] = srcSize( source );
 	const res = simResolution();
 	const s = res / Math.max( sw, sh );
@@ -424,7 +424,7 @@ async function analyze() {
 		`Analysis ${ Math.round( r.timings.analysis ) } ms, planning ${ Math.round( r.timings.plan ) } ms in a worker. ` +
 		`Palette fidelity ΔE ${ an.stats.paletteDE.toFixed( 1 ) }; blank-paper similarity ${ r.baseline.scores.similarity.toFixed( 1 ) }.`;
 	$( 'time' ).textContent = `0:00 / ${ fmt( duration ) }`;
-	for ( const id of [ 'start', 'quick', 'restart', 'exportPng' ] ) {
+	for ( const id of [ 'start', 'quick', 'realtime', 'restart', 'exportPng' ] ) {
 		$( id ).disabled = false;
 	}
 	$( 'record' ).disabled = ! exporter.canRecord();
@@ -471,30 +471,33 @@ function setPlayLabel() {
 }
 
 /**
- * Paint (or Quick draw: the same painting, every drop, splash and stroke,
- * time-lapsed into QUICK_SECONDS). Pressing Paint while painting pauses.
+ * Start painting in a mode: 'paint' (fits the duration), 'quick' (Quick
+ * draw: time-lapsed, about QUICK_SECONDS, until everything is painted) or
+ * 'realtime' (the painter's own pace, until everything is painted). The
+ * Paint button pauses and resumes whichever is running.
  */
-function play( quick ) {
+function play( mode ) {
 	if ( ! session ) {
 		return;
 	}
 	const st = animation.state;
-	if ( ! quick && 'painting' === st ) {
+	if ( 'paint' === mode && 'painting' === st ) {
 		animation.pause();
-	} else if ( ! quick && 'paused' === st ) {
+	} else if ( 'paint' === mode && 'paused' === st ) {
 		animation.resume();
 	} else {
-		if ( 'ready' !== st || quick !== !! animation.timelapse ) {
+		if ( 'ready' !== st || mode !== animation.mode ) {
 			restart();
 		}
-		animation.setTimelapse( quick ? QUICK_SECONDS : 0 );
+		animation.setMode( mode, QUICK_SECONDS );
 		animation.start();
 		setStatus( '' );
 	}
 	setPlayLabel();
 }
-$( 'start' ).addEventListener( 'click', () => play( false ) );
-$( 'quick' ).addEventListener( 'click', () => play( true ) );
+$( 'start' ).addEventListener( 'click', () => play( 'paint' ) );
+$( 'quick' ).addEventListener( 'click', () => play( 'quick' ) );
+$( 'realtime' ).addEventListener( 'click', () => play( 'realtime' ) );
 
 function restart() {
 	animation.reset();
@@ -511,7 +514,7 @@ $( 'restart' ).addEventListener( 'click', () => {
 	if ( wasPainting ) {
 		animation.start();
 	} else {
-		animation.setTimelapse( 0 );
+		animation.setMode( 'paint' );
 	}
 	setPlayLabel();
 } );
@@ -541,7 +544,6 @@ async function finalEvaluation() {
 
 async function handleDone() {
 	setPlayLabel();
-	animation.setTimelapse( 0 );
 	if ( ! DEV ) {
 		setStatus( 'Finished.' );
 		doneResolve?.();
@@ -581,7 +583,13 @@ $( 'record' ).addEventListener( 'click', async () => {
 function updateHud( s ) {
 	const label = { ready: 'Ready', painting: s.stage, paused: 'Paused — ' + s.stage, done: 'Finished', idle: 'Ready' }[ s.state ] || s.stage;
 	$( 'stageName' ).textContent = label;
-	$( 'time' ).textContent = `${ fmt( s.simTime ) } / ${ fmt( s.duration ) }`;
+	// Waiting for paint to dry is fast-forwarded in Real time: say so.
+	$( 'dryFast' ).hidden = ! s.dryingFast;
+	if ( s.dryingFast ) {
+		$( 'dryFast' ).textContent = `Drying ×${ s.dryingFast }`;
+	}
+	// Open-ended modes (Quick draw, Real time) have no set duration.
+	$( 'time' ).textContent = s.duration ? `${ fmt( s.simTime ) } / ${ fmt( s.duration ) }` : fmt( s.simTime );
 	$( 'bar' ).style.width = s.progress * 100 + '%';
 	setPlayLabel();
 	if ( ! DEV ) {

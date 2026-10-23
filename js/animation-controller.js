@@ -15,6 +15,11 @@ import { Rng } from './prng.js';
 import { STAGES, stageAt, planGapStrokes } from './composition-planner.js';
 
 const BASE_DT = 1 / 30; // painting seconds per simulation step
+// Real time: how much faster the clock runs while the painter only waits
+// for paint to dry.
+const DRY_FAST = 10;
+// Open-ended modes: the longest pause between two planned gestures.
+const MAX_IDLE = 1.5;
 
 export class AnimationController {
 	constructor( { renderer, adaptive, evaluate, planLayer, onStats, onDone } ) {
@@ -26,6 +31,7 @@ export class AnimationController {
 		this.onDone = onDone;
 		this.state = 'idle';
 		this.speed = 1;
+		this.setMode( 'paint' );
 		this.last = 0;
 		this._loop = this._loop.bind( this );
 		requestAnimationFrame( this._loop );
@@ -65,6 +71,9 @@ export class AnimationController {
 		this.layerIdx = 0;
 		this.layerPending = false;
 		this.layerOps = 0;
+		this.layerExec0 = 0;
+		this.layerCount = 0;
+		this.dryingWait = false;
 		this.epoch = ( this.epoch || 0 ) + 1;
 		this.layerName = 'Reading the values';
 		this.model.setLayer( null );
@@ -101,20 +110,31 @@ export class AnimationController {
 	}
 
 	/**
-	 * Time-lapse (Quick draw): play the painting fast enough that its planned
-	 * duration takes about `seconds` of real time (0 turns it off). Nothing
-	 * is trimmed to fit: it runs at that speed until everything is painted.
-	 * The simulation and every gesture speed up together, so the drops,
-	 * splashes and strokes all still show.
+	 * How the painting is played:
+	 * - 'paint': fits the chosen duration, at the playback speed.
+	 * - 'quick': Quick draw, a time-lapse (the planned duration plays in
+	 *   about `quickSeconds`); nothing is trimmed, it runs until done.
+	 * - 'realtime': the painter's own pace, 1x with every animation; nothing
+	 *   is trimmed and nothing waits (each layer starts as soon as the last
+	 *   one is done); the duration does not apply.
+	 * In 'quick' the simulation and every gesture speed up together, so the
+	 * drops, splashes and strokes all still show.
 	 */
-	setTimelapse( seconds ) {
-		this.timelapse = seconds;
+	setMode( mode, quickSeconds = 20 ) {
+		this.mode = mode;
+		this.timelapse = 'quick' === mode ? quickSeconds : 0;
+		// Open-ended: no time budget and no schedule, only the work.
+		this.openEnded = 'paint' !== mode;
 	}
 
 	/** Painting seconds per real second. */
 	get rate() {
-		if ( this.timelapse && this.duration ) {
+		if ( 'quick' === this.mode && this.duration ) {
 			return this.duration / this.timelapse;
+		}
+		if ( 'realtime' === this.mode ) {
+			// Waiting only for paint to dry: fast-forward until there is work.
+			return this.dryingWait ? DRY_FAST : 1;
 		}
 		return this.speed;
 	}
@@ -334,15 +354,16 @@ export class AnimationController {
 		}
 		const L = layers[ this.layerIdx ];
 		const handFree = this.animator.brushFreeAt - this.animator.clock < 0.5;
-		if ( this.simTime < L.t0 * this.duration || this.deferred.length || ! handFree ) {
+		// Open-ended modes start a layer as soon as the last one is done.
+		if ( ( ! this.openEnded && this.simTime < L.t0 * this.duration ) || this.deferred.length || ! handFree ) {
 			return;
 		}
 		this.layerPending = true;
 		const idx = this.layerIdx;
 		const cur = this.model.snapshotPigment();
 		const epoch = this.epoch = ( this.epoch || 0 ) + 1;
-		// Quick draw plans without time limits: it paints everything.
-		this.planLayer( { layer: idx, cur: cur.buffer, handX: this.splash.handX, handY: this.splash.handY, seed: idx, unlimited: !! this.timelapse }, [ cur.buffer ] ).then( ( res ) => {
+		// Open-ended modes plan without time limits: they paint everything.
+		this.planLayer( { layer: idx, cur: cur.buffer, handX: this.splash.handX, handY: this.splash.handY, seed: idx, unlimited: !! this.openEnded }, [ cur.buffer ] ).then( ( res ) => {
 			if ( epoch !== this.epoch ) {
 				return; // restarted meanwhile
 			}
@@ -352,7 +373,23 @@ export class AnimationController {
 			// left, so later layers are never pushed past the end.
 			const span = res.ops.length ? res.ops[ res.ops.length - 1 ].t : 0;
 			const avail = Math.max( 0.04 * this.duration, L.t1 * this.duration - base );
-			const squeeze = span > avail && ! this.timelapse ? avail / span : 1;
+			const squeeze = span > avail && ! this.openEnded ? avail / span : 1;
+			// Open-ended modes never sit idle: a long empty wait between two
+			// gestures (a splash planned late in the layer's time slot) is cut
+			// short. Brushwork queues on the hand anyway.
+			if ( this.openEnded ) {
+				res.ops.sort( ( a, b ) => a.t - b.t );
+				let prev = 0;
+				let shift = 0;
+				for ( const op of res.ops ) {
+					const gap = op.t - prev;
+					prev = op.t;
+					if ( gap > MAX_IDLE ) {
+						shift += gap - MAX_IDLE;
+					}
+					op.t -= shift;
+				}
+			}
 			for ( const op of res.ops ) {
 				op.t = base + op.t * squeeze;
 				op.stage = idx;
@@ -360,6 +397,9 @@ export class AnimationController {
 			}
 			this.layerName = L.name;
 			this.layerIdx = idx + 1;
+			// For progress in open-ended modes.
+			this.layerExec0 = this.executed;
+			this.layerCount = res.ops.length;
 			this.layerPending = false;
 			this.layerOps = ( this.layerOps || 0 ) + res.ops.length;
 		} );
@@ -448,15 +488,20 @@ export class AnimationController {
 		const frameStart = performance.now();
 		if ( painting ) {
 			const dtReal = Math.min( dtMs, 100 ) / 1000;
+			// Nothing in the painter's hands and nothing being planned, only
+			// strokes waiting for wet paint (or the final drying): in Real time
+			// that wait is fast-forwarded.
+			this.dryingWait = 'realtime' === this.mode && ! this.animator.busy && ! this.layerPending && ( this.finishing || this.deferred.some( ( o ) => o.defers > 0 ) );
 			// In a time-lapse the gestures speed up with everything else.
 			const rate = this.rate;
-			const lapse = this.timelapse ? rate : 1;
+			const lapse = 'quick' === this.mode ? rate : 1;
 			this.animator.tick( dtReal * lapse );
 			// The hand never hurries: while brushwork is backed up, the timeline
 			// waits; it also waits while the painter steps back to plan a layer.
 			const handBusy = this.animator.brushFreeAt - this.animator.clock > 2.5 * lapse;
 			const dtPaint = handBusy || this.layerPending ? 0 : dtReal * rate;
-			const atEnd = this.simTime >= this.duration - BASE_DT * this.adaptive.dtScale;
+			// Open-ended modes have no end time: they end when the work is done.
+			const atEnd = this.openEnded || this.simTime >= this.duration - BASE_DT * this.adaptive.dtScale;
 			const layersDone = ! this.plan.layers || ( this.layerIdx >= this.plan.layers.length && ! this.layerPending );
 			const planDone = this.cursor >= this.plan.ops.length && 0 === this.deferred.length && ! this.animator.busy && layersDone;
 			if ( atEnd && planDone ) {
@@ -494,13 +539,20 @@ export class AnimationController {
 	}
 
 	stats() {
-		const u = Math.min( 1, this.simTime / this.duration );
+		let u = Math.min( 1, this.simTime / this.duration );
+		if ( this.openEnded && this.plan.layers ) {
+			// Progress by work done: layers finished, plus the current one's ops.
+			const n = this.plan.layers.length;
+			const frac = this.layerCount ? Math.min( 1, ( this.executed - ( this.layerExec0 || 0 ) ) / this.layerCount ) : 0;
+			u = Math.min( 1, ( Math.max( 0, this.layerIdx - 1 ) + frac ) / n );
+		}
 		const stage = 'done' === this.state ? STAGES.length - 1 : stageAt( u );
 		const layered = !! this.plan.layers;
 		return {
 			state: this.state,
-			simTime: Math.min( this.simTime, this.duration ),
-			duration: this.duration,
+			simTime: this.openEnded ? this.simTime : Math.min( this.simTime, this.duration ),
+			// Open-ended modes have no set duration.
+			duration: this.openEnded ? 0 : this.duration,
 			progress: 'done' === this.state ? 1 : u * 0.995,
 			stage: layered ? ( 'done' === this.state ? 'Finished' : this.finishing ? 'Drying' : this.layerName ) : STAGES[ stage ].name,
 			fps: this.adaptive.fps,
@@ -513,6 +565,8 @@ export class AnimationController {
 			deferred: this.deferred.length,
 			wet: this.drying.summary( this.model ),
 			scores: this.lastScores,
+			// Fast-forward factor while only waiting for paint to dry (0 = not).
+			dryingFast: this.dryingWait && 'painting' === this.state ? DRY_FAST : 0,
 			corrections: this.corrections,
 		};
 	}

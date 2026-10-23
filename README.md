@@ -19,7 +19,11 @@ duration) apply as soon as they change. **Paint** plays the painting in
 real time over the chosen duration; **Quick draw** time-lapses the painting
 (its planned duration plays in about 20 seconds) with no time limits: no
 shape, detail or gap is trimmed to fit, so it runs until everything is
-painted, every drop, splash and stroke. Speed, seed and
+painted, every drop, splash and stroke. **Real time** is the painter's own
+pace: 1× with every animation, no time limits and no waiting (each layer
+starts as soon as the last is done). Whenever the painter can only wait
+for paint to dry (strokes queued for a wet area, the final drying), the
+clock runs 10× faster and the header shows "Drying ×10". The Duration slider does not apply to it. Speed, seed and
 the reference view are under *More options*.
 
 **Photos:** *Image type* is detected automatically (shown as "Auto

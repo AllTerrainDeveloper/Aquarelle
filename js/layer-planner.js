@@ -933,7 +933,8 @@ export function planLayer( ctx, layer, state ) {
 			}
 		}
 		// Specks are dotted in as the painter goes (drops do not need the hand).
-		const tEnd = Math.max( t, window * 0.5 );
+		// Open-ended modes keep them within the actual work (no idle time).
+		const tEnd = state.unlimited ? Math.max( t, 0.3 + specks.length * DAB_SECS ) : Math.max( t, window * 0.5 );
 		walk( specks, hx, hy ).forEach( ( sp, j, list ) => {
 			ops.push( dab( sp.k, sp, 0.3 + ( ( tEnd - 0.3 ) * j ) / Math.max( 1, list.length ), pigments, rng ) );
 		} );
