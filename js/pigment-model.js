@@ -209,18 +209,29 @@ export class PigmentModel {
 		}
 		if ( b.brush ) {
 			// Tone for the whole stroke: what the area under the path still needs.
+			// Graded washes judge against dried paint only, so fresh drops poured
+			// just before do not cancel the wash meant to spread them.
 			const Tk = this.T[ b.level ][ b.k ];
 			let sum = 0;
+			let pos = 0;
 			let n = 0;
+			let np = 0;
 			const P = b.path;
 			for ( let j = 0; j < P.length; j += 4 ) {
 				if ( P[ j + 3 ] > 0 ) {
 					const i = Math.round( P[ j + 1 ] ) * this.W + Math.round( P[ j ] );
-					sum += Math.max( 0, Tk[ i ] - this.d[ b.k ][ i ] - this.g[ b.k ][ i ] );
+					const nd = Math.max( 0, Tk[ i ] - this.d[ b.k ][ i ] - ( b.graded ? 0 : this.g[ b.k ][ i ] ) );
+					sum += nd;
 					n++;
+					if ( nd > 0.02 ) {
+						pos += nd;
+						np++;
+					}
 				}
 			}
 			b.meanNeed = n ? sum / n : 0;
+			// Where the wash runs on under a neighbour, it keeps its own tone.
+			b.toneFloor = np ? ( 0.6 * b.amount * pos ) / np : 0;
 			return b.meanNeed >= b.minNeed;
 		}
 		const { W } = this;
@@ -447,7 +458,7 @@ export class PigmentModel {
 				const ci = Math.min( H - 1, Math.max( 0, Math.round( cy ) ) ) * W + Math.min( W - 1, Math.max( 0, Math.round( cx ) ) );
 				// Against dried paint only: the stroke's own fresh (suspended) paint
 				// must not make its leading edge think the job is already done.
-				tone = b.amount * Math.max( 0, this.T[ b.level ][ k ][ ci ] - this.d[ k ][ ci ] );
+				tone = Math.max( b.amount * Math.max( 0, this.T[ b.level ][ k ][ ci ] - this.d[ k ][ ci ] ), b.toneFloor || 0 );
 			}
 			// Stroke direction here (for bristle streaks across it).
 			const jp = Math.max( 0, j - 4 );

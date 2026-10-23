@@ -802,7 +802,9 @@ export function planComposition( an, { duration, seed, density = 1, fineDetail =
 				continue;
 			}
 			const thick = Math.sqrt( own.length / Math.PI );
-			const w = Math.min( B * 0.05, Math.max( B * 0.01, thick * 0.45 * brushScale ) );
+			// Near-white colours barely show: a big brush, quickly.
+			const faint = Math.max( ...pigments[ main ].A ) < 0.6;
+			const w = Math.min( B * ( faint ? 0.09 : 0.05 ), Math.max( B * 0.01, thick * ( faint ? 0.8 : 0.45 ) * brushScale ) );
 			// Run deliberately past the edge, under neighbours painted later (and
 			// small unassigned bits), never under earlier ones or into whites.
 			const pos = orderPos[ o ];

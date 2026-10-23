@@ -185,12 +185,32 @@ export class GestureAnimator {
 		for ( let i = 0; i < order.length; i++ ) {
 			const a = order[ i ];
 			let keep = true;
-			if ( t >= a.start && ( i < 4 || performance.now() < deadline ) ) {
+			// Decide whether a gesture has anything to paint before it becomes
+			// visible (a brush's approach, a drop's fall), not when it lands.
+			const lead = a.approach || a.fall || ( undefined !== a.launch ? a.start - a.launch : 0 );
+			if ( t >= a.start - lead && ( i < 4 || performance.now() < deadline ) ) {
 				if ( ! a.prepared ) {
 					a.prepared = true;
 					if ( a.blob && ! model.prepare( a.blob ) ) {
 						a.empty = true;
+						// Never mime a stroke with nothing to paint: drop it and let the
+						// strokes queued behind it move up.
+						if ( 'brush' === a.tool ) {
+							const saved = a.dur + ( a.approach || 0 ) * 2;
+							for ( const b of this.actions ) {
+								if ( 'brush' === b.tool && b.start > a.start ) {
+									b.start -= saved;
+								}
+							}
+							this.brushFreeAt -= saved;
+						}
+						a.hidden = true;
+						continue;
 					}
+				}
+				if ( t < a.start ) {
+					order[ w++ ] = a;
+					continue;
 				}
 				const x = a.dur > 0 ? Math.min( 1, ( t - a.start ) / a.dur ) : 1;
 				const p = 'radial' === a.mode ? 1 - Math.pow( 1 - x, 2.2 ) : x;
