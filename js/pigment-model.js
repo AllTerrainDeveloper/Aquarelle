@@ -284,6 +284,35 @@ export class PigmentModel {
 			b.meanNeed = n ? sum / n : 0;
 			// Where the wash runs on under a neighbour, it keeps its own tone.
 			b.toneFloor = np ? ( 0.6 * b.amount * pos ) / np : 0;
+			if ( b.graded ) {
+				// Graded tone, smoothed along the path: it follows the image's
+				// gradual change (a brow fading to its tip) but not the texture of
+				// the paint underneath, which would make the stroke pulse.
+				const n = P.length / 4;
+				const raw = new Float32Array( n );
+				for ( let q = 0; q < n; q++ ) {
+					const i = Math.min( this.H - 1, Math.max( 0, Math.round( P[ q * 4 + 1 ] ) ) ) * this.W + Math.min( this.W - 1, Math.max( 0, Math.round( P[ q * 4 ] ) ) );
+					raw[ q ] = Math.max( 0, Tk[ i ] - this.d[ b.k ][ i ] );
+				}
+				const win = Math.max( 3, Math.round( n * 0.08 ) );
+				b.toneAt = new Float32Array( n );
+				let acc = 0;
+				let cnt = 0;
+				for ( let q = 0; q < n + win; q++ ) {
+					if ( q < n ) {
+						acc += raw[ q ];
+						cnt++;
+					}
+					if ( q - 2 * win - 1 >= 0 ) {
+						acc -= raw[ q - 2 * win - 1 ];
+						cnt--;
+					}
+					const c = q - win;
+					if ( c >= 0 && c < n ) {
+						b.toneAt[ c ] = b.amount * ( acc / Math.max( 1, cnt ) );
+					}
+				}
+			}
 			return b.meanNeed >= b.minNeed;
 		}
 		const { W } = this;
@@ -511,15 +540,24 @@ export class PigmentModel {
 			}
 			const cx = P[ j ];
 			const cy = P[ j + 1 ];
-			const ext = tr * 1.25 + 1;
+			// The stroke is a continuous ribbon: each step paints the capsule from
+			// the previous tip position to this one, its width blending between
+			// them, so the line is solid however far apart its points are.
+			const hasPrev = j >= 4 && P[ j - 1 ] > 0;
+			const ax = hasPrev ? P[ j - 4 ] : cx;
+			const ay = hasPrev ? P[ j - 3 ] : cy;
+			const ar = hasPrev ? P[ j - 1 ] : tr;
+			const vx = cx - ax;
+			const vy = cy - ay;
+			const vl2 = vx * vx + vy * vy;
+			const ext = Math.max( tr, ar ) * 1.25 + 1;
 			// Graded wash: the tone follows what the target needs where the brush
 			// is now (at the wash's soft scale), changing smoothly along the path.
 			let tone = b.tone;
-			if ( b.graded && gk ) {
-				const ci = Math.min( H - 1, Math.max( 0, Math.round( cy ) ) ) * W + Math.min( W - 1, Math.max( 0, Math.round( cx ) ) );
-				// Against dried paint only: the stroke's own fresh (suspended) paint
-				// must not make its leading edge think the job is already done.
-				tone = Math.max( b.amount * Math.max( 0, this._T( b.level, k )[ ci ] - this.d[ k ][ ci ] ), b.toneFloor || 0 );
+			if ( b.graded && gk && b.toneAt ) {
+				// Smoothed along the path (see prepare); against dried paint only,
+				// so the stroke's own fresh paint does not fade its leading edge.
+				tone = Math.max( b.toneAt[ j / 4 ], b.toneFloor || 0 );
 			}
 			// Stroke direction here (for bristle streaks across it).
 			const jp = Math.max( 0, j - 4 );
@@ -532,10 +570,10 @@ export class PigmentModel {
 			// The brush unloads as it goes: a little lighter toward the end.
 			const load = 1 - ( b.unload ?? 0.2 ) * sj;
 			const dry = b.water < 0.25;
-			const xa = Math.max( b.bx0, Math.floor( cx - ext ) );
-			const xb = Math.min( b.bx0 + b.bw - 1, Math.ceil( cx + ext ) );
-			const ya = Math.max( b.by0, Math.floor( cy - ext ) );
-			const yb = Math.min( b.by0 + b.bh - 1, Math.ceil( cy + ext ) );
+			const xa = Math.max( b.bx0, Math.floor( Math.min( ax, cx ) - ext ) );
+			const xb = Math.min( b.bx0 + b.bw - 1, Math.ceil( Math.max( ax, cx ) + ext ) );
+			const ya = Math.max( b.by0, Math.floor( Math.min( ay, cy ) - ext ) );
+			const yb = Math.min( b.by0 + b.bh - 1, Math.ceil( Math.max( ay, cy ) + ext ) );
 			for ( let y = ya; y <= yb; y++ ) {
 				for ( let x = xa; x <= xb; x++ ) {
 					const mi = ( y - b.by0 ) * b.bw + ( x - b.bx0 );
@@ -560,8 +598,15 @@ export class PigmentModel {
 					}
 					const had = Math.max( b.mask[ mi ], washed );
 					const n = valueNoise( x * 0.35, y * 0.35, seed );
-					// Ragged edge: bristles skip on the paper's tooth.
-					const d = Math.hypot( x - cx, y - cy ) / tr + ( n - 0.5 ) * 0.3 + ( this.paper[ y * W + x ] - 0.5 ) * 0.2;
+					// Nearest point on this step of the ribbon, and the tip width there.
+					const tt = vl2 > 1e-6 ? Math.min( 1, Math.max( 0, ( ( x - ax ) * vx + ( y - ay ) * vy ) / vl2 ) ) : 1;
+					const qx = ax + vx * tt;
+					const qy = ay + vy * tt;
+					const rr = ar + ( tr - ar ) * tt;
+					// Ragged edge: bristles skip on the paper's tooth (never enough to
+					// cut a thin line: the noise is scaled to the tip).
+					const rough = Math.min( 1, rr / 2 );
+					const d = Math.hypot( x - qx, y - qy ) / rr + ( ( n - 0.5 ) * 0.3 + ( this.paper[ y * W + x ] - 0.5 ) * 0.2 ) * rough;
 					if ( d >= 1 ) {
 						continue;
 					}
@@ -581,11 +626,11 @@ export class PigmentModel {
 					}
 					// Bristle streaks: a texture that depends only on the position
 					// across the stroke, so it runs along the stroke's direction.
-					const across = ( ( x - cx ) * -uy + ( y - cy ) * ux ) / tr;
+					const across = ( ( x - qx ) * -uy + ( y - qy ) * ux ) / rr;
 					const bristle = valueNoise( across * 4.5 + 7.3, 0.5, seed ^ 0x2c1b );
 					let streak = 0.82 + 0.36 * bristle;
 					// Near-dry strokes skip on the paper's tooth (dry-brush breaks).
-					if ( dry && bristle < 0.28 && this.paper[ i ] > 0.5 ) {
+					if ( dry && rr > 2.5 && bristle < 0.28 && this.paper[ i ] > 0.5 ) {
 						streak *= 0.25;
 					}
 					if ( gk ) {
