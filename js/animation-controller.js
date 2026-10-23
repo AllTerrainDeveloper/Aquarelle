@@ -101,9 +101,12 @@ export class AnimationController {
 				const b = by * EW + bx;
 				const i = Math.min( model.H - 1, by * 2 ) * W + Math.min( W - 1, bx * 2 );
 				const wetPenalty = model.h[ i ] > 0.05 ? 0.35 : 1;
+				// Silhouettes are where blind corrections do the most harm:
+				// a border that is slightly off reads better than one reworked.
+				const edgeCalm = 1 - 0.75 * this.an.edge[ i ];
 				// Ignore errors that are already within a perceptual tolerance.
 				const e = Math.max( 0, err[ b ] - 3.5 );
-				weight[ b ] = e * e * wetPenalty;
+				weight[ b ] = e * e * wetPenalty * edgeCalm;
 				acc += weight[ b ];
 				cdf[ b ] = acc;
 			}
@@ -112,6 +115,7 @@ export class AnimationController {
 		this.renderer.uploadError( res.errU8, EW, EH );
 	}
 
+	/** Samples a block from the error field (no side effects). */
 	_sampleError( rng ) {
 		const f = this.errorField;
 		if ( ! f || f.total <= 0 ) {
@@ -132,49 +136,78 @@ export class AnimationController {
 			if ( rng.float() > f.used[ lo ] ) {
 				continue;
 			}
-			// Discourage piling corrections on the same spot before the next evaluation.
 			const bx = lo % f.EW;
 			const by = ( lo / f.EW ) | 0;
-			for ( let dy = -3; dy <= 3; dy++ ) {
-				for ( let dx = -3; dx <= 3; dx++ ) {
-					const x = bx + dx;
-					const y = by + dy;
-					if ( x >= 0 && y >= 0 && x < f.EW && y < f.EH ) {
-						f.used[ y * f.EW + x ] *= 0.55;
-					}
-				}
-			}
-			return { x: ( bx + rng.float() ) * 2, y: ( by + rng.float() ) * 2, signed: f.signed[ lo ], err: f.err[ lo ] };
+			return { b: lo, x: ( bx + rng.float() ) * 2, y: ( by + rng.float() ) * 2, signed: f.signed[ lo ], err: f.err[ lo ] };
 		}
 		return null;
+	}
+
+	/** Discourage piling corrections on the same spot before the next evaluation. */
+	_useBlock( b ) {
+		const f = this.errorField;
+		const bx = b % f.EW;
+		const by = ( b / f.EW ) | 0;
+		for ( let dy = -3; dy <= 3; dy++ ) {
+			for ( let dx = -3; dx <= 3; dx++ ) {
+				const x = bx + dx;
+				const y = by + dy;
+				if ( x >= 0 && y >= 0 && x < f.EW && y < f.EH ) {
+					f.used[ y * f.EW + x ] *= 0.4;
+				}
+			}
+		}
 	}
 
 	/** Correction slot -> concrete op (paint, lift, or nothing). */
 	_materialize( slot ) {
 		const rng = new Rng( slot.seed );
-		// Prefer a spot that needs the colour already on the brush.
+		const loaded = this.splash.loaded;
+		// Corrections only use the colour already on the brush. If no spot needs
+		// it, the slot passes; the planned sessions bring every colour back in turn.
+		// Among the spots needing that colour, go to the nearest one (weighted by
+		// how wrong it is) instead of jumping across the sheet.
 		let p = null;
-		for ( let tries = 0; tries < 6; tries++ ) {
+		let first = null;
+		let bestScore = -Infinity;
+		const hx = this.splash.handX;
+		const hy = this.splash.handY;
+		const reach = this.an.B * 0.12;
+		for ( let tries = 0; tries < 18; tries++ ) {
 			const c = this._sampleError( rng );
 			if ( ! c ) {
 				break;
 			}
-			if ( ! p ) {
-				p = c;
-			}
-			if ( c.signed >= -5 && this.splash.loaded >= 0 && this.splash.autoPigment( c.x, c.y, 0 ) === this.splash.loaded ) {
-				p = c;
-				break;
+			first = first || c;
+			if ( loaded >= 0 && c.signed >= -5 && this.splash.autoPigment( c.x, c.y, 0, -1 ) === loaded ) {
+				const score = Math.log( 1 + c.err ) - Math.hypot( c.x - hx, c.y - hy ) / reach;
+				if ( score > bestScore ) {
+					bestScore = score;
+					p = c;
+				}
 			}
 		}
+		if ( ! p && loaded >= 0 ) {
+			// Too-dark spots are lifted with a clean brush, whatever the colour.
+			p = first && first.signed < -5 ? first : null;
+		}
+		p = p || ( loaded < 0 ? first : null );
 		if ( ! p ) {
+			this.corrections.skip++;
 			return null;
 		}
+		this._useBlock( p.b );
 		const an = this.an;
 		const progress = this.simTime / this.duration;
 		const i = Math.min( an.H - 1, Math.round( p.y ) ) * an.W + Math.min( an.W - 1, Math.round( p.x ) );
 		const r = Math.max( 1.3, an.scale[ i ] * ( 1.5 - 0.9 * progress ) ) * rng.range( 0.8, 1.2 );
+		const edge = an.edge[ i ];
 		if ( p.signed < -5 ) {
+			// Lifting on or near a silhouette leaves pale beads: let edges be.
+			if ( edge > 0.3 || this.splash.edgeNear( p.x, p.y, r * 1.2 ) > 0.25 ) {
+				this.corrections.skip++;
+				return null;
+			}
 			this.corrections.lift++;
 			return { type: 'lift', x: p.x, y: p.y, r: r * 1.2, strength: Math.min( 0.7, -p.signed / 25 ), seed: slot.seed, chaos: 0.3 };
 		}
@@ -199,6 +232,8 @@ export class AnimationController {
 			follow: 0.9,
 			chaos: slot.chaos,
 			requireDry: small,
+			// Corrections are deliberate brushwork, never splashes.
+			brushOnly: true,
 			seed: slot.seed,
 		};
 	}
@@ -315,7 +350,9 @@ export class AnimationController {
 		if ( painting ) {
 			const dtReal = Math.min( dtMs, 100 ) / 1000;
 			this.animator.tick( dtReal );
-			const dtPaint = dtReal * this.speed;
+			// The hand never hurries: while brushwork is backed up, the timeline waits.
+			const handBusy = this.animator.brushFreeAt - this.animator.clock > 2.5;
+			const dtPaint = handBusy ? 0 : dtReal * this.speed;
 			const atEnd = this.simTime >= this.duration - BASE_DT * this.adaptive.dtScale;
 			const planDone = this.cursor >= this.plan.ops.length && 0 === this.deferred.length && ! this.animator.busy;
 			if ( atEnd && planDone ) {

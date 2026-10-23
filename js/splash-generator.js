@@ -22,8 +22,10 @@ export class SplashGenerator {
 		this.drying = drying;
 		this.complexity = 1;
 		this.animator = null;
-		// The pigment currently on the brush.
+		// The pigment currently on the brush, and where the brush last was.
 		this.loaded = -1;
+		this.handX = analysis.W / 2;
+		this.handY = analysis.H / 2;
 
 	}
 
@@ -51,6 +53,37 @@ export class SplashGenerator {
 	_idx( x, y ) {
 		const { W, H } = this.an;
 		return Math.min( H - 1, Math.max( 0, Math.round( y ) ) ) * W + Math.min( W - 1, Math.max( 0, Math.round( x ) ) );
+	}
+
+	/** Strongest edge within radius r of (x, y): borders between colour areas. */
+	edgeNear( x, y, r ) {
+		const { W, H, edge } = this.an;
+		let m = 0;
+		const st = Math.max( 1, r / 3 );
+		for ( let dy = -r; dy <= r; dy += st ) {
+			for ( let dx = -r; dx <= r; dx += st ) {
+				const xx = Math.round( x + dx );
+				const yy = Math.round( y + dy );
+				if ( xx >= 0 && yy >= 0 && xx < W && yy < H ) {
+					m = Math.max( m, edge[ yy * W + xx ] );
+				}
+			}
+		}
+		return m;
+	}
+
+	/** Direction along the local contour (perpendicular to the tonal gradient). */
+	_tangent( x, y ) {
+		const { W, H, darkness } = this.an;
+		const xi = Math.min( W - 2, Math.max( 1, Math.round( x ) ) );
+		const yi = Math.min( H - 2, Math.max( 1, Math.round( y ) ) );
+		let gx = 0;
+		let gy = 0;
+		for ( let d = -1; d <= 1; d++ ) {
+			gx += darkness[ ( yi + d ) * W + xi + 1 ] - darkness[ ( yi + d ) * W + xi - 1 ];
+			gy += darkness[ ( yi + 1 ) * W + xi + d ] - darkness[ ( yi - 1 ) * W + xi + d ];
+		}
+		return Math.atan2( gy, gx ) + Math.PI / 2;
 	}
 
 	/**
@@ -87,7 +120,7 @@ export class SplashGenerator {
 		const amp = extra.amp ?? 0.16;
 		const prof = this._profile( rng, amp );
 		const aspect = extra.aspect ?? rng.range( 1, 1.45 );
-		const dir = rng.range( 0, Math.PI * 2 );
+		const dir = extra.rot ?? rng.range( 0, Math.PI * 2 );
 		return {
 			x,
 			y,
@@ -95,7 +128,7 @@ export class SplashGenerator {
 			k,
 			level: op.level ?? 1,
 			aspect,
-			rot: rng.range( 0, Math.PI ),
+			rot: extra.rot ?? rng.range( 0, Math.PI ),
 			profile: prof,
 			reach: prof.max * aspect,
 			soft: extra.soft ?? 0.35,
@@ -133,16 +166,28 @@ export class SplashGenerator {
 	 */
 	_brush( rng, op, x, y, r, k, extra = {}, delay = 0 ) {
 		const anim = this.animator;
-		if ( anim && anim.brushFreeAt - this.now > 1.2 ) {
+		const backlog = anim ? anim.brushFreeAt - this.now : 0;
+		if ( anim && ! extra.queue && backlog > 1.2 ) {
 			this._drop( rng, op, x, y, r, k, { crown: 2 + rng.int( 4 ), extra, delay } );
 			return null;
 		}
+		if ( anim && extra.queue && backlog > 3 ) {
+			// The hand is busy: this mark is left for a later pass.
+			return null;
+		}
 		const blob = this._stamp( rng, op, x, y, r, k, extra );
+		if ( k >= 0 ) {
+			this.loaded = k;
+		}
+		this.handX = x;
+		this.handY = y;
 		const R = r * blob.reach * 0.85;
 		const passes = extra.passes ?? Math.max( 1, Math.min( 5, Math.ceil( R / ( this.an.B * 0.03 ) ) ) );
 		blob.passes = passes;
-		const dur = ( 0.25 + passes * rng.range( 0.4, 0.6 ) ) * ( extra.slow ?? 1 );
-		const approach = 0.22;
+		// Small marks are quick flicks of a fine brush; washes take their time.
+		const size = Math.min( 1, r / ( this.an.B * 0.025 ) );
+		const dur = ( 0.25 + passes * rng.range( 0.4, 0.6 ) ) * ( extra.slow ?? 1 ) * ( 0.45 + 0.55 * size );
+		const approach = 0.08 + 0.14 * size;
 		const start = anim ? Math.max( this.now + delay, anim.brushFreeAt + approach ) : 0;
 		if ( anim ) {
 			anim.brushFreeAt = start + dur + approach;
@@ -202,7 +247,15 @@ export class SplashGenerator {
 			if ( sx < 0 || sy < 0 || sx >= an.W || sy >= an.H ) {
 				continue;
 			}
-			const imp = an.importance[ this._idx( sx, sy ) ];
+			const si = this._idx( sx, sy );
+			const imp = an.importance[ si ];
+			// Droplets stay inside the colour area they were thrown in; only
+			// background spatter may wander, and never onto a border.
+			const near = this.edgeNear( sx, sy, 2 );
+			const sameArea = an.labels[ si ] === an.labels[ this._idx( x, y ) ];
+			if ( near > 0.3 || ( ! sameArea && ( imp > 0.35 || near > 0.15 ) ) ) {
+				continue;
+			}
 			// Decorative allowance only where it cannot hurt the subject.
 			const spill = 0.14 * ( op.chaos ?? 1 ) * ( 1 - imp ) * ( 1 - imp );
 			const sr = Math.max( 0.8, r * ( far ? rng.range( 0.05, 0.14 ) : rng.range( 0.08, 0.22 ) ) );
@@ -249,6 +302,8 @@ export class SplashGenerator {
 		const r = op.r * rng.range( 0.85, 1.18 );
 
 		if ( op.requireDry && ! op.force && ! this.drying.isDryEnough( model, x, y, r ) ) {
+			// Coming back to a wet spot: help that spot dry, then return.
+			this.drying.helpDry( model, x, y, r );
 			return false;
 		}
 
@@ -262,9 +317,6 @@ export class SplashGenerator {
 			const pk = op.pk ?? -1;
 			k = pk >= 0 && model.need( pk, level, this._idx( x, y ) ) > 0.015 ? pk : this.autoPigment( x, y, level );
 		}
-		if ( k >= 0 ) {
-			this.loaded = k;
-		}
 		const B = an.B;
 
 		switch ( op.type ) {
@@ -274,14 +326,14 @@ export class SplashGenerator {
 				}
 				// Big masses arrive as heavy drops with a crown; later washes mix
 				// drops and brush sweeps.
-				if ( 0 === op.stage || rng.float() < 0.45 ) {
+				if ( ! op.brushOnly && ( 0 === op.stage || rng.float() < 0.45 ) ) {
 					this._drop( rng, op, x, y, r, k, {
 						crown: Math.round( 4 + ( r / B ) * 110 ),
 						spray: rng.float() < 0.5 ? rng.int( 10 ) : 0,
 						extra: { amp: 0.2, soft: 0.45 },
 					} );
 				} else {
-					this._brush( rng, op, x, y, r, k, { amp: 0.18, soft: 0.45 } );
+					this._brush( rng, op, x, y, r, k, { amp: 0.18, soft: 0.45, queue: !! op.brushOnly } );
 				}
 				return true;
 
@@ -289,18 +341,25 @@ export class SplashGenerator {
 				if ( k < 0 ) {
 					return true;
 				}
-				if ( rng.float() < 0.3 ) {
-					this._drop( rng, op, x, y, r, k, { crown: rng.int( 3 ), extra: { amp: 0.06, soft: 0.25, aspect: 1.05, capMul: 1.05 } } );
-				} else {
-					this._brush( rng, op, x, y, r, k, { amp: 0.12, soft: 0.2, aspect: rng.range( 1, 2.2 ), capMul: 1.05, passes: 1, slow: 0.8 } );
-				}
+				// Detail is brushwork drawn along the contour, like a hairline.
+				this._brush( rng, op, x, y, r, k, {
+					amp: 0.1,
+					soft: 0.2,
+					// Sized and oriented to the shape it paints (planner), else along the contour.
+					aspect: op.aspect ?? rng.range( 1.8, 3 ),
+					rot: op.rot ?? this._tangent( x, y ) + rng.normal() * 0.15,
+					capMul: 1.05,
+					passes: op.aspect ? undefined : 1,
+					slow: 1.1,
+					queue: true,
+				} );
 				return true;
 
 			case 'drop':
 				if ( k < 0 ) {
 					return true;
 				}
-				this._drop( rng, op, x, y, r, k, { crown: 3 + rng.int( 6 ), extra: { amp: 0.05, soft: 0.25, aspect: rng.range( 1, 1.15 ) } } );
+				this._drop( rng, op, x, y, r, k, { extra: { amp: 0.05, soft: 0.25, aspect: rng.range( 1, 1.15 ) } } );
 				return true;
 
 			case 'wetblend': {
@@ -322,7 +381,8 @@ export class SplashGenerator {
 			}
 
 			case 'bloom':
-				if ( this.drying.isDamp( model, x, y, r ) ) {
+				// A backrun on a border leaves a pale ring: blooms stay inside areas.
+				if ( this.drying.isDamp( model, x, y, r ) && this.edgeNear( x, y, r * 1.3 ) < 0.2 ) {
 					this._drop( rng, op, x, y, r, -1, { extra: { amp: 0.3, soft: 0.3, water: op.water, follow: 0 }, color: 'rgba(170,205,235,0.75)' } );
 				}
 				return true;

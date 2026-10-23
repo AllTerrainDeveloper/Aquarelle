@@ -47,6 +47,8 @@ body {
 }
 
 .panel {
+	overflow-x: hidden;
+	min-width: 0;
 	background: var(--panel);
 	border-inline-end: 1px solid var(--line);
 	padding: 20px 18px 32px;
@@ -133,6 +135,8 @@ body {
 .field label {
 	display: flex;
 	justify-content: space-between;
+	align-items: baseline;
+	gap: 8px;
 	font-size: 13px;
 }
 
@@ -159,6 +163,8 @@ output {
 
 input[type="number"],
 select {
+	width: 100%;
+	min-width: 0;
 	font: inherit;
 	color: inherit;
 	background: var(--panel);
@@ -169,6 +175,8 @@ select {
 
 input[type="range"] {
 	width: 100%;
+	min-width: 0;
+	margin: 0;
 	accent-color: var(--accent);
 }
 
@@ -198,8 +206,16 @@ button.primary {
 	font-weight: 600;
 }
 
-button.icon {
-	padding: 6px 10px;
+button.link {
+	background: none;
+	border: 0;
+	padding: 0;
+	color: var(--accent);
+	font-size: 12px;
+}
+
+button.link:hover:not(:disabled) {
+	text-decoration: underline;
 }
 
 button.attention {

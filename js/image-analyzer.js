@@ -75,6 +75,46 @@ export function gaussBlur( src, W, H, sigma ) {
 	return b;
 }
 
+/** Separable local extremum with a square window of radius r. */
+function rankFilter( src, W, H, r, pick ) {
+	const tmp = new Float32Array( src.length );
+	const out = new Float32Array( src.length );
+	for ( let y = 0; y < H; y++ ) {
+		const row = y * W;
+		for ( let x = 0; x < W; x++ ) {
+			let m = src[ row + x ];
+			const x0 = Math.max( 0, x - r );
+			const x1 = Math.min( W - 1, x + r );
+			for ( let k = x0; k <= x1; k++ ) {
+				m = pick( m, src[ row + k ] );
+			}
+			tmp[ row + x ] = m;
+		}
+	}
+	for ( let x = 0; x < W; x++ ) {
+		for ( let y = 0; y < H; y++ ) {
+			let m = tmp[ y * W + x ];
+			const y0 = Math.max( 0, y - r );
+			const y1 = Math.min( H - 1, y + r );
+			for ( let k = y0; k <= y1; k++ ) {
+				m = pick( m, tmp[ k * W + x ] );
+			}
+			out[ y * W + x ] = m;
+		}
+	}
+	return out;
+}
+
+/** Dilation (local maximum). */
+export function maxFilter( src, W, H, r ) {
+	return rankFilter( src, W, H, r, Math.max );
+}
+
+/** Erosion (local minimum) with a square window of radius r. */
+export function minFilter( src, W, H, r ) {
+	return rankFilter( src, W, H, r, Math.min );
+}
+
 export function percentile( arr, p ) {
 	const step = Math.max( 1, Math.floor( arr.length / 20000 ) );
 	const s = [];
@@ -425,11 +465,17 @@ export function analyzeImage( { width: W, height: H, pixels, K, seed } ) {
 	}
 	mark( 'decomposition' );
 
-	// Coarse-to-fine target pyramids for each pigment.
-	const sig1 = Math.max( 1.2, B / 120 );
-	const sig2 = Math.max( 3, B / 38 );
-	const T1 = T0.map( ( m, k ) => ( pigments[ k ].isPaper ? m : gaussBlur( m, W, H, sig1 ) ) );
-	const T2 = T0.map( ( m, k ) => ( pigments[ k ].isPaper ? m : gaussBlur( m, W, H, sig2 ) ) );
+	// Coarse-to-fine targets, one per tool size. A broad gesture can only be
+	// as precise as its tool: its target is the morphological opening of the
+	// fine target at its own scale (erode, then dilate back). Large areas keep
+	// their full extent right up to their borders, while shapes narrower than
+	// the tool (letters, eyelids, strands) are left for the fine brush. An
+	// opening is never darker than the original, so nothing overshoots.
+	const level = ( m, r ) => maxFilter( minFilter( m, W, H, r ), W, H, r );
+	const r1 = Math.max( 1, Math.round( B / 130 ) );
+	const r2 = Math.max( 3, Math.round( B / 45 ) );
+	const T1 = T0.map( ( m, k ) => ( pigments[ k ].isPaper ? m : level( m, r1 ) ) );
+	const T2 = T0.map( ( m, k ) => ( pigments[ k ].isPaper ? m : level( m, r2 ) ) );
 	mark( 'pyramid' );
 
 	/* Segmentation -------------------------------------------------- */
@@ -564,6 +610,39 @@ export function analyzeImage( { width: W, height: H, pixels, K, seed } ) {
 	}
 	mark( 'scale' );
 
+	/* Masking fluid: small whites next to edges stay bare paper ---------- */
+	// A painter masks out white lettering and highlights before washing over
+	// them. Paper-white cells within a few cells of a strong edge are reserved.
+	const nearEdge = new Uint8Array( N );
+	const ER = Math.max( 2, Math.round( B / 260 ) );
+	for ( let y = 0; y < H; y++ ) {
+		for ( let x = 0; x < W; x++ ) {
+			if ( edge[ y * W + x ] > 0.35 ) {
+				for ( let dy = -ER; dy <= ER; dy++ ) {
+					const yy = y + dy;
+					if ( yy < 0 || yy >= H ) {
+						continue;
+					}
+					for ( let dx = -ER; dx <= ER; dx++ ) {
+						const xx = x + dx;
+						if ( xx >= 0 && xx < W ) {
+							nearEdge[ yy * W + xx ] = 1;
+						}
+					}
+				}
+			}
+		}
+	}
+	const reserve = new Uint8Array( N );
+	let reserved = 0;
+	for ( let i = 0; i < N; i++ ) {
+		if ( nearEdge[ i ] && Dt[ i * 3 ] + Dt[ i * 3 + 1 ] + Dt[ i * 3 + 2 ] < 0.12 ) {
+			reserve[ i ] = 1;
+			reserved++;
+		}
+	}
+	mark( 'reserve' );
+
 	// Palette fidelity: how well can this palette reproduce the image at all?
 	let paletteDE = 0;
 	for ( let i = 0; i < N; i += 3 ) {
@@ -591,10 +670,11 @@ export function analyzeImage( { width: W, height: H, pixels, K, seed } ) {
 		importance,
 		scale,
 		darkness,
+		reserve,
 		labels,
 		regionOf,
 		regions,
-		stats: { paletteDE, fitErr: fitErr / N, regions: regions.length },
+		stats: { paletteDE, fitErr: fitErr / N, regions: regions.length, reserved: reserved / N },
 		times,
 	};
 }

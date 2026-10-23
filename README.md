@@ -14,8 +14,9 @@ Static site, no build step and no dependencies: serve the folder and open
 python3 -m http.server 8765
 ```
 
-URL options: `?sample=portrait|landscape|lowcolor|detailed|contrast` loads a
-built-in test image; `?bench=1&benchSpeed=12&benchRt=20` runs the benchmark
+URL options: `?sample=portrait|landscape|lowcolor|detailed|contrast|lettering`
+loads a built-in test image; `?instant=1` (QA) applies paint without the
+animated hand; `?bench=1&benchSpeed=16&benchRt=20` runs the benchmark
 (each image is timed at 1× for `benchRt` seconds, then finished at
 `benchSpeed`×).
 
@@ -31,7 +32,12 @@ built-in test image; `?bench=1&benchSpeed=12&benchRt=20` runs the benchmark
    transmittance), which yields one **target density map per pigment**,
    blurred at three scales (fine, mid, coarse). The decomposition keeps
    continuous tones, so quantisation never flattens the image into
-   posterised regions. The analysis also produces edge, detail, importance
+   posterised regions. **One target per tool size:** a broad gesture can
+   only be as precise as its tool, so its target is the fine target
+   *opened* at its own scale (erode, then dilate back): large areas keep
+   their full extent right up to their borders, while shapes narrower than
+   the tool are left out, and no gesture ever darkens past the final value.
+   Lettering and small shapes appear only when the fine brush paints them. The analysis also produces edge, detail, importance
    (edge density, colour contrast, centre prior, detail), feature-scale and
    darkness maps, plus a segmentation (labels → mode filter → connected
    components).
@@ -63,8 +69,30 @@ built-in test image; `?bench=1&benchSpeed=12&benchRt=20` runs the benchmark
    clear water with the brush, then charge two pigments into it as drops.
    Lifts are a clean damp brush blotting the spot. Gestures run on a real-time clock, so they keep
    a natural pace at any playback speed; higher speed only makes the rain
-   of gestures denser. The artist has one hand: brush strokes are queued,
-   and when the hand is busy the paint is dropped instead.
+   of drops denser. The artist has one hand: brush strokes are queued, the
+   planner budgets detail and correction strokes to what one hand can paint
+   (about one per second), detail strokes follow the contour, and when the
+   hand is backed up the timeline waits rather than hurrying it.
+   **One colour at a time, nearest area next:** the timeline is cut into
+   sessions (duration / 8); each session works pigment by pigment, starting
+   with the colour already on the brush. Each colour's marks are walked as
+   a route from where the brush is (nearest first, then a 2-opt pass to
+   uncross it), so the brush moves to the closest area needing that colour
+   instead of jumping across the sheet. Corrections only use the colour on
+   the brush and pick the nearest spot that needs it.
+   **Detail is painted shape by shape:** for each colour, the leftover the
+   washes could not give (fine target − opened target: a letter, a sliver of
+   blue around a white letter, an eyelid) is found as connected shapes, and
+   each gets one or more near-dry strokes sized and oriented to it
+   (principal axes), most visible first, within the hand budget. Small
+   whites next to edges are reserved with **masking fluid** (no water or
+   pigment enters them), as a painter masks white lettering.
+   A **Fine detail** setting (Soft → Maximum) raises the grid resolution
+   (300 → 800 px) and the number and fineness of detail strokes.
+   **Borders stay clean:** splashes land only in the background, satellite
+   droplets stay inside their parent's colour area, blooms and lifts never
+   happen near an edge, and single droplets are reserved for genuinely
+   small features.
 5. **Simulation.** A simplified Curtis et al. (1997) model on a CPU grid
    (see the research basis below). Wet paint flows while it is being
    placed.
@@ -113,7 +141,7 @@ Modules: `ImageAnalyzer`, `CompositionPlanner`, `SplashGenerator`,
 | Big stamps / many gestures in one frame | Ops per frame, sim time per frame and gesture-deposit time per frame are capped by the adaptive level; blooming drops only scan the radius reached so far |
 | Gesture pile-up at high speed | Backpressure: above a cap on gestures in flight, new ops wait (the timeline slows, frames don't) |
 | Fast playback (×8–×64) | Simulation step size grows (`dtScale` up to 4×); if still behind, the timeline slows rather than the UI |
-| Slow devices | Adaptive levels lower render scale, evaluation frequency, splash complexity and per-frame budgets; sim resolution is chosen up front (Auto/High/Medium/Low) |
+| Slow devices | Adaptive levels lower render scale, evaluation frequency, splash complexity and per-frame budgets; sim resolution is chosen up front with the Fine detail setting |
 
 ### 4. Visual similarity
 
@@ -137,20 +165,20 @@ reference.
 
 - Simulation time is the master clock. The wall clock × speed sets a
   target. The frame interleaves due ops and fixed 1/30 s steps until it
-  reaches the target or exhausts its budget (9 ms at level 0). Rendering
-  happens every frame regardless.
+  reaches the target or exhausts its budget (7 ms at level 0, plus 3 ms
+  for gesture deposits). Rendering happens every frame regardless.
 - Duration is a parameter (minutes; default 10). The planner lays every
-  stage out over the chosen duration. Drying compresses with it
-  (evaporation × 600/duration), and gestures get brisker for short
-  paintings.
-- Dry-brush ops that land on wet paint are re-scheduled after a short
-  delay, never blocking the canvas. After 6 deferrals they paint wet-on-wet.
+  stage out over the chosen duration and sizes brushwork to it.
+- Drying is natural everywhere. It is accelerated only locally, when the
+  brush must return to a spot that is still wet; the stroke is re-scheduled
+  a moment later, never blocking the canvas (after 6 tries it paints
+  wet-on-wet). The painting finishes when the last wash has dried.
 - FPS and per-subsystem times are measured live (Diagnostics panel) and by
   the benchmark. No number below is estimated.
 
 ## Measured results
 
-See `BENCHMARK.md` (generated from the in-app benchmark).
+See [BENCHMARK.md](BENCHMARK.md): measured results and how to rerun them.
 
 ## Research basis
 

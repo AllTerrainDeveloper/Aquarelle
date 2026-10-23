@@ -93,7 +93,7 @@ const smooth = ( a, b, x ) => {
 	return t * t * ( 3 - 2 * t );
 };
 
-export function planComposition( an, { duration, seed, density = 1 } ) {
+export function planComposition( an, { duration, seed, density = 1, fineDetail = { strokes: 1, fine: 1 } } ) {
 	const t0 = performance.now();
 	const rng = new Rng( ( seed ^ 0x9e3779b9 ) >>> 0 );
 	const { W, H, B, pigments, T, edge, detail, importance, scale, darkness, labels, regions, regionOf } = an;
@@ -218,7 +218,8 @@ export function planComposition( an, { duration, seed, density = 1 } ) {
 			}
 			const r = Math.min( B * 0.05, Math.max( B * 0.014, scale[ at( p.x, p.y ) ] * 1.3 ) ) * rng.range( 0.8, 1.2 );
 			add( 2, {
-				type: r > B * 0.025 ? 'wash' : 'drop',
+				// Medium marks are washes; single droplets are kept for real details.
+				type: 'wash',
 				k,
 				x: p.x,
 				y: p.y,
@@ -280,45 +281,121 @@ export function planComposition( an, { duration, seed, density = 1 } ) {
 		} );
 	}
 
-	/* 4. Shadows, contrast & detail: small dry-brush marks, darks last  */
-	let edgeMass = 0;
-	for ( let i = 0; i < N; i++ ) {
-		if ( edge[ i ] > 0.25 ) {
-			edgeMass++;
+	/* 4. Detail: paint exactly what the broad washes could not ---------- */
+	// For each colour, the fine brush's job is the fine target minus what the
+	// wash-level target already gives (a letter, a sliver of blue around a
+	// white letter, an eyelid). Each such leftover shape gets one or more
+	// near-dry strokes sized and oriented to it (principal axes), instead of
+	// random dabs. One hand, natural pace: the stroke budget follows the stage
+	// length; the most visible shapes go first and the rest is left to the
+	// corrections.
+	const handBudget = Math.round( ( STAGES[ 4 ].t1 - STAGES[ 4 ].t0 ) * duration * 0.8 * fineDetail.strokes * density );
+	const shapes = [];
+	const seen = new Uint8Array( N );
+	const stack = new Int32Array( N );
+	for ( let k = 0; k < K; k++ ) {
+		if ( pigments[ k ].isPaper ) {
+			continue;
+		}
+		const T0k = T[ 0 ][ k ];
+		const T1k = T[ 1 ][ k ];
+		const inShape = ( i ) => T0k[ i ] > 0.08 && T0k[ i ] - T1k[ i ] > 0.05;
+		seen.fill( 0 );
+		for ( let s0 = 0; s0 < N; s0++ ) {
+			if ( seen[ s0 ] || ! inShape( s0 ) ) {
+				continue;
+			}
+			let sp = 0;
+			stack[ sp++ ] = s0;
+			seen[ s0 ] = 1;
+			let n = 0;
+			let sx = 0;
+			let sy = 0;
+			let sxx = 0;
+			let syy = 0;
+			let sxy = 0;
+			let mass = 0;
+			while ( sp > 0 ) {
+				const i = stack[ --sp ];
+				const x = i % W;
+				const y = ( i / W ) | 0;
+				n++;
+				sx += x;
+				sy += y;
+				sxx += x * x;
+				syy += y * y;
+				sxy += x * y;
+				mass += ( T0k[ i ] - T1k[ i ] ) * importance[ i ];
+				const nb = [ x > 0 ? i - 1 : -1, x < W - 1 ? i + 1 : -1, y > 0 ? i - W : -1, y < H - 1 ? i + W : -1 ];
+				for ( const j of nb ) {
+					if ( j >= 0 && ! seen[ j ] && inShape( j ) ) {
+						seen[ j ] = 1;
+						stack[ sp++ ] = j;
+					}
+				}
+			}
+			if ( n < 3 ) {
+				continue;
+			}
+			const mx = sx / n;
+			const my = sy / n;
+			const cxx = sxx / n - mx * mx;
+			const cyy = syy / n - my * my;
+			const cxy = sxy / n - mx * my;
+			const tr = cxx + cyy;
+			const det = cxx * cyy - cxy * cxy;
+			const disc = Math.sqrt( Math.max( 0, ( tr * tr ) / 4 - det ) );
+			const l1 = tr / 2 + disc;
+			const l2 = Math.max( 0, tr / 2 - disc );
+			shapes.push( {
+				k,
+				x: mx,
+				y: my,
+				angle: 0.5 * Math.atan2( 2 * cxy, cxx - cyy ),
+				half: 2 * Math.sqrt( l1 ) + 1,
+				width: 2 * Math.sqrt( l2 ) + 1,
+				mass,
+			} );
 		}
 	}
-	const n4 = Math.round( Math.min( 1500, Math.max( 150, ( edgeMass / ( Math.PI * ( B * 0.012 ) ** 2 ) ) * 0.9 ) ) * density );
-	const dSampler = new MapSampler(
-		( i ) => ( 0.65 * Math.pow( edge[ i ], 1.3 ) + 0.35 * detail[ i ] ) * ( 0.35 + importance[ i ] ) * ( 0.4 + Math.min( 1, darkness[ i ] ) ),
-		W,
-		H
-	);
-	for ( let j = 0; j < n4; j++ ) {
-		const p = dSampler.sample( rng );
-		if ( ! p ) {
-			break;
+	shapes.sort( ( a, b ) => b.mass - a.mass );
+	let strokes = 0;
+	for ( const sh of shapes ) {
+		const across = Math.max( 1.2, sh.width * 1.15 );
+		const pieces = Math.max( 1, Math.ceil( sh.half / ( 3 * across ) ) );
+		if ( strokes + pieces > handBudget ) {
+			continue;
 		}
-		const i = at( p.x, p.y );
-		add( 4, {
-			type: 'detail',
-			k: -1,
-			x: p.x,
-			y: p.y,
-			r: Math.min( B * 0.03, Math.max( 1.3, scale[ i ] * 0.75 ) ) * rng.range( 0.8, 1.2 ),
-			amount: 0.9,
-			water: rng.range( 0.22, 0.32 ),
-			flat: 0.12,
-			follow: 0.95,
-			level: 0,
-			requireDry: true,
-			order: darkness[ i ] + rng.range( 0, 0.35 ),
-		} );
+		strokes += pieces;
+		const ux = Math.cos( sh.angle );
+		const uy = Math.sin( sh.angle );
+		for ( let j = 0; j < pieces; j++ ) {
+			const off = -sh.half + ( ( 2 * j + 1 ) * sh.half ) / pieces;
+			add( 4, {
+				type: 'detail',
+				k: sh.k,
+				x: sh.x + ux * off,
+				y: sh.y + uy * off,
+				r: across,
+				rot: sh.angle,
+				aspect: Math.min( 3.2, Math.max( 1, ( ( sh.half / pieces ) * 1.15 ) / across ) ),
+				amount: 0.95,
+				water: rng.range( 0.08, 0.14 ),
+				flat: 0.05,
+				follow: 0.97,
+				level: 0,
+				chaos: 0.15,
+				requireDry: true,
+				order: darkness[ at( sh.x, sh.y ) ] + rng.range( 0, 0.2 ),
+			} );
+		}
 	}
 
-	/* 5. Splashes & accents: decorative, near silhouettes and outskirts */
+	/* 5. Splashes & accents: decorative, in the background, off the edges */
 	const nSplash = Math.round( ( 30 + rng.int( 20 ) ) * density );
-	const edgeOut = new MapSampler( ( i ) => edge[ i ] * ( 1 - 0.6 * importance[ i ] ), W, H );
-	const outskirts = new MapSampler( ( i ) => ( 1 - importance[ i ] ) ** 2, W, H );
+	// A splash on the border between two big colour areas reads as a stray dot.
+	const outskirts = new MapSampler( ( i ) => ( 1 - importance[ i ] ) ** 2 * ( 1 - edge[ i ] ) ** 3, W, H );
+	const edgeOut = outskirts;
 	for ( let j = 0; j < nSplash; j++ ) {
 		const p = ( rng.float() < 0.6 ? edgeOut : outskirts ).sample( rng );
 		if ( ! p ) {
@@ -341,8 +418,9 @@ export function planComposition( an, { duration, seed, density = 1 } ) {
 			order: rng.float(),
 		} );
 	}
-	const midSampler = new MapSampler( ( i ) => importance[ i ] * ( 0.3 + detail[ i ] ), W, H );
-	for ( let j = 0; j < Math.round( 24 * density ); j++ ) {
+	// Single droplets only where there is a genuinely small feature (a highlight, an eye).
+	const midSampler = new MapSampler( ( i ) => ( scale[ i ] < B * 0.015 && detail[ i ] > 0.55 ? importance[ i ] * detail[ i ] : 0 ), W, H );
+	for ( let j = 0; j < Math.round( 12 * density ); j++ ) {
 		const p = midSampler.sample( rng );
 		if ( ! p ) {
 			break;
@@ -461,7 +539,8 @@ export function planComposition( an, { duration, seed, density = 1 } ) {
 	}
 
 	/* Correction slots, denser toward the end ------------------------- */
-	const nC = Math.round( ops.length * 0.38 );
+	// Corrections share the same hand: keep them within its pace too.
+	const nC = Math.min( Math.round( ops.length * 0.38 ), Math.round( 0.67 * duration * 0.35 * Math.sqrt( fineDetail.strokes ) ) );
 	for ( let j = 0; j < nC; j++ ) {
 		const u = ( j + rng.float() ) / nC;
 		const t = duration * ( 0.3 + 0.67 * Math.pow( u, 0.85 ) );
@@ -469,6 +548,112 @@ export function planComposition( an, { duration, seed, density = 1 } ) {
 	}
 
 	ops.sort( ( a, b ) => a.t - b.t );
+
+	/* Colour sessions across the whole timeline -------------------------- */
+	// Stages overlap in time, so per-stage grouping alone still alternates
+	// colours. Cut the timeline into sessions; inside each one, every mark is
+	// grouped by pigment, starting with the colour already on the brush, and
+	// correction slots go last so they keep using that colour. The slot times
+	// stay where they were, so pacing is unchanged.
+	const sessionLen = Math.max( 8, duration / 8 );
+	let carry = -1;
+	// Where the brush is; each colour's marks are walked from here, nearest first.
+	let bx = W / 2;
+	let by = H / 2;
+	const walk = ( group ) => {
+		const out = [];
+		const used = new Uint8Array( group.length );
+		for ( let n = 0; n < group.length; n++ ) {
+			let best = -1;
+			let bd = Infinity;
+			for ( let j = 0; j < group.length; j++ ) {
+				if ( ! used[ j ] ) {
+					const d = Math.hypot( group[ j ].x - bx, group[ j ].y - by );
+					if ( d < bd ) {
+						bd = d;
+						best = j;
+					}
+				}
+			}
+			used[ best ] = 1;
+			out.push( group[ best ] );
+			bx = group[ best ].x;
+			by = group[ best ].y;
+		}
+		// 2-opt: uncross the route so greedy leftovers don't force long jumps back.
+		const dist = ( a, b ) => Math.hypot( a.x - b.x, a.y - b.y );
+		for ( let pass = 0, improved = true; improved && pass < 25; pass++ ) {
+			improved = false;
+			for ( let i = 0; i < out.length - 2; i++ ) {
+				for ( let j = i + 2; j < out.length; j++ ) {
+					const a = out[ i ];
+					const b = out[ i + 1 ];
+					const c = out[ j ];
+					const d = out[ j + 1 ];
+					const before = dist( a, b ) + ( d ? dist( c, d ) : 0 );
+					const after = dist( a, c ) + ( d ? dist( b, d ) : 0 );
+					if ( after < before - 1e-6 ) {
+						for ( let l = i + 1, r = j; l < r; l++, r-- ) {
+							const t = out[ l ];
+							out[ l ] = out[ r ];
+							out[ r ] = t;
+						}
+						improved = true;
+					}
+				}
+			}
+		}
+		if ( out.length ) {
+			bx = out[ out.length - 1 ].x;
+			by = out[ out.length - 1 ].y;
+		}
+		return out;
+	};
+	for ( let i = 0; i < ops.length; ) {
+		const tEnd = ops[ i ].t + sessionLen;
+		let j = i;
+		while ( j < ops.length && ops[ j ].t < tEnd ) {
+			j++;
+		}
+		const chunk = ops.slice( i, j );
+		const times = chunk.map( ( o ) => o.t );
+		const groupKey = ( o ) => {
+			if ( 'correct' === o.type ) {
+				return 1e6;
+			}
+			const k = o.pk ?? o.k ?? -1;
+			if ( k < 0 ) {
+				return 1e5;
+			}
+			return k === carry ? -1 : rank[ k ];
+		};
+		const groups = new Map();
+		for ( const o of chunk ) {
+			const g = groupKey( o );
+			if ( ! groups.has( g ) ) {
+				groups.set( g, [] );
+			}
+			groups.get( g ).push( o );
+		}
+		chunk.length = 0;
+		for ( const g of [ ...groups.keys() ].sort( ( a, b ) => a - b ) ) {
+			const list = groups.get( g );
+			chunk.push( ...( 1e6 === g ? list : walk( list ) ) );
+		}
+		chunk.forEach( ( o, n ) => {
+			o.t = times[ n ];
+			ops[ i + n ] = o;
+		} );
+		for ( let n = chunk.length - 1; n >= 0; n-- ) {
+			const k = chunk[ n ].pk ?? chunk[ n ].k ?? -1;
+			if ( k >= 0 && 'correct' !== chunk[ n ].type ) {
+				carry = k;
+				break;
+			}
+		}
+		i = j;
+	}
+
 	const counts = STAGES.map( () => 0 );
 	const byType = {};
 	for ( const op of ops ) {

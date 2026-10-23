@@ -30,7 +30,7 @@ self.onmessage = ( e ) => {
 					seed: msg.seed,
 				} );
 				const t1 = performance.now();
-				const plan = planComposition( an, { duration: msg.duration, seed: msg.seed } );
+				const plan = planComposition( an, { duration: msg.duration, seed: msg.seed, fineDetail: msg.detail } );
 				const t2 = performance.now();
 				const ref = pixelsToLabLinear( new Uint8ClampedArray( msg.refPixels ), msg.refW * msg.refH );
 				evaluator = new SimilarityEvaluator( {
@@ -52,11 +52,13 @@ self.onmessage = ( e ) => {
 						}
 					}
 				}
-				transfer.push( an.edge.buffer, an.detail.buffer, an.importance.buffer, an.scale.buffer, an.darkness.buffer );
-				const { lab, labels, regionOf, regions, ...rest } = an;
+				transfer.push( an.edge.buffer, an.detail.buffer, an.importance.buffer, an.scale.buffer, an.darkness.buffer, an.reserve.buffer );
+				const labels = Uint8Array.from( an.labels );
+				transfer.push( labels.buffer );
+				const { lab, labels: _l, regionOf, regions, ...rest } = an;
 				reply(
 					{
-						analysis: { ...rest, regionCount: regions.length },
+						analysis: { ...rest, labels, regionCount: regions.length },
 						plan,
 						baseline,
 						timings: { analysis: t1 - t0, plan: t2 - t1, evaluator: t3 - t2, total: t3 - t0, steps: an.times },

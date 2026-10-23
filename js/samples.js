@@ -355,12 +355,62 @@ function highContrast( c ) {
 	}
 }
 
+function lettering( c ) {
+	const W = ( c.width = 900 );
+	const H = ( c.height = 900 );
+	const g = c.getContext( '2d' );
+	g.fillStyle = '#ffffff';
+	g.fillRect( 0, 0, W, H );
+	// A blue disc label with a white band, lettering and a simple mark.
+	g.fillStyle = '#1f6fb8';
+	ellipse( g, 450, 450, 420, 420 );
+	g.fillStyle = '#f2f4f7';
+	g.save();
+	g.beginPath();
+	g.arc( 450, 450, 420, 0, Math.PI * 2 );
+	g.clip();
+	g.fillRect( 0, 0, W, 250 );
+	g.restore();
+	g.fillStyle = '#ffffff';
+	ellipse( g, 450, 450, 95, 95 );
+	g.fillStyle = '#dfe3e8';
+	ellipse( g, 450, 450, 45, 45 );
+	g.fillStyle = '#111111';
+	g.font = '600 74px Helvetica, Arial, sans-serif';
+	g.textAlign = 'center';
+	g.fillText( 'AQUARELLE', 450, 190 );
+	g.fillStyle = '#ffffff';
+	g.textAlign = 'left';
+	g.font = '700 64px Helvetica, Arial, sans-serif';
+	g.fillText( 'Watercolor', 90, 410 );
+	g.font = '400 40px Helvetica, Arial, sans-serif';
+	g.fillText( 'Paint something', 92, 470 );
+	g.font = '400 30px Helvetica, Arial, sans-serif';
+	g.fillText( 'Drops · Splashes · Brushes', 150, 620 );
+	g.fillText( 'Version 1.0', 360, 760 );
+	// A simple circular mark.
+	g.strokeStyle = '#ffffff';
+	g.lineWidth = 16;
+	g.beginPath();
+	g.arc( 690, 450, 105, 0, Math.PI * 2 );
+	g.stroke();
+	g.lineWidth = 22;
+	g.beginPath();
+	g.moveTo( 640, 395 );
+	g.lineTo( 668, 505 );
+	g.lineTo( 690, 440 );
+	g.lineTo( 712, 505 );
+	g.lineTo( 740, 395 );
+	g.stroke();
+}
+
 export const SAMPLES = {
 	portrait: { label: 'Portrait', draw: portrait },
 	landscape: { label: 'Landscape', draw: landscape },
 	lowcolor: { label: 'Low-color', draw: lowColor },
 	detailed: { label: 'Detailed', draw: detailed },
 	contrast: { label: 'High-contrast', draw: highContrast },
+	lettering: { label: 'Lettering', draw: lettering },
 };
 
 export function makeSample( name ) {

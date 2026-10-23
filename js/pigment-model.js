@@ -29,7 +29,7 @@ const DRY = 0.004;
 const TS = 16;
 
 export class PigmentModel {
-	constructor( { W, H, pigments, T, paper } ) {
+	constructor( { W, H, pigments, T, paper, reserve } ) {
 		this.W = W;
 		this.H = H;
 		const N = ( this.N = W * H );
@@ -45,8 +45,10 @@ export class PigmentModel {
 		this.paper = paper;
 		this.cap = new Float32Array( N );
 		for ( let i = 0; i < N; i++ ) {
-			this.cap[ i ] = 0.4 + 0.5 * paper[ i ];
+			// Masked (reserved) paper never takes water: washes flow around it.
+			this.cap[ i ] = reserve && reserve[ i ] ? 1e9 : 0.4 + 0.5 * paper[ i ];
 		}
+		this.reserve = reserve || new Uint8Array( N );
 		this.h = new Float32Array( N );
 		this.g = [];
 		this.d = [];
@@ -81,6 +83,7 @@ export class PigmentModel {
 		this.time = 0;
 		this.wetCells = 0;
 		this.activeTiles = 0;
+		this.dryZones = [];
 		this.dirtyY0 = H;
 		this.dirtyY1 = -1;
 	}
@@ -99,6 +102,47 @@ export class PigmentModel {
 		this.time = 0;
 		this.wetCells = 0;
 		this.activeTiles = 0;
+		this.dryZones = [];
+	}
+
+	/** Local accelerated drying (only where the brush must return soon). */
+	addDryZone( x, y, r, seconds ) {
+		for ( const z of this.dryZones ) {
+			if ( Math.hypot( z.x - x, z.y - y ) < z.r * 0.5 ) {
+				z.left = Math.max( z.left, seconds );
+				z.r = Math.max( z.r, r );
+				return;
+			}
+		}
+		this.dryZones.push( { x, y, r, left: seconds } );
+	}
+
+	_applyDryZones( dt ) {
+		const { W, H, h } = this;
+		const rate = this.params.evap * 6 * dt;
+		let w = 0;
+		for ( const z of this.dryZones ) {
+			const x0 = Math.max( 0, Math.floor( z.x - z.r ) );
+			const x1 = Math.min( W - 1, Math.ceil( z.x + z.r ) );
+			const y0 = Math.max( 0, Math.floor( z.y - z.r ) );
+			const y1 = Math.min( H - 1, Math.ceil( z.y + z.r ) );
+			for ( let y = y0; y <= y1; y++ ) {
+				for ( let x = x0; x <= x1; x++ ) {
+					const d = Math.hypot( x - z.x, y - z.y ) / z.r;
+					if ( d < 1 ) {
+						const i = y * W + x;
+						if ( h[ i ] > 0 ) {
+							h[ i ] = Math.max( 0, h[ i ] - rate * ( 1 - d * d ) );
+						}
+					}
+				}
+			}
+			z.left -= dt;
+			if ( z.left > 0 ) {
+				this.dryZones[ w++ ] = z;
+			}
+		}
+		this.dryZones.length = w;
 	}
 
 	tileOf( x, y ) {
@@ -213,6 +257,8 @@ export class PigmentModel {
 		const k = b.k;
 		const h = this.h;
 		const meanNeed = b.meanNeed;
+		// The target at this gesture's scale (eroded and softened for broad
+		// tools, so they never stencil fine shapes nor overshoot them).
 		const Tk = k >= 0 ? this.T[ b.level ][ k ] : null;
 		const gk = k >= 0 ? this.g[ k ] : null;
 		const dk = k >= 0 ? this.d[ k ] : null;
@@ -267,7 +313,12 @@ export class PigmentModel {
 					}
 				}
 				const i = y * W + x;
+				if ( this.reserve[ i ] ) {
+					continue;
+				}
 				let mm = m;
+				// Water goes where the paint goes: dry gaps keep fine shapes from bleeding.
+				let wm = m;
 				if ( k >= 0 ) {
 					const nd = Math.max( 0, Tk[ i ] - dk[ i ] - gk[ i ] );
 					if ( b.follow > 0 ) {
@@ -275,6 +326,7 @@ export class PigmentModel {
 						let cov = ratio / 0.35;
 						cov = cov <= 0 ? 0 : cov >= 1 ? 1 : cov * cov * ( 3 - 2 * cov );
 						mm = m * ( 1 - b.follow + b.follow * cov );
+						wm = m * cov;
 					}
 					let pig = b.amount * ( nd + ( meanNeed - nd ) * b.flat ) * ( 0.92 + 0.16 * n );
 					pig = Math.min( pig, nd * b.capMul + b.spill );
@@ -287,8 +339,8 @@ export class PigmentModel {
 				} else {
 					total += b.water * mm;
 				}
-				if ( b.water > 0 && mm > 0 ) {
-					const hv = h[ i ] + b.water * mm * ( 0.75 + 0.5 * n );
+				if ( b.water > 0 && wm > 0 ) {
+					const hv = h[ i ] + b.water * wm * ( 0.75 + 0.5 * n );
 					h[ i ] = hv > 1.6 ? 1.6 : hv;
 				}
 				if ( x < tx0 ) {
@@ -380,6 +432,9 @@ export class PigmentModel {
 		const { W, H, TX, TY, h, fx, fy, tmp, cap, paper, list, mark, proc, tileWet, tilePig } = this;
 		const P = this.params;
 		this.time += dt;
+		if ( this.dryZones.length ) {
+			this._applyDryZones( dt );
+		}
 
 		// Wet tiles plus a one-tile ring.
 		let n = 0;

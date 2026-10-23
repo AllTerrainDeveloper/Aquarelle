@@ -1,10 +1,11 @@
 /**
- * DryingModel — time compression and per-region drying states.
+ * DryingModel — natural drying, helped along only where it is needed.
  *
- * Drying is compressed so a full painting fits the chosen duration: the
- * evaporation rate scales with 600 / duration (a 2-minute painting dries
- * five times faster than the 10-minute default). States are derived from
- * the water field and the last time a tile was touched:
+ * Paint dries at its own pace everywhere: when the brush moves on, the area
+ * it left dries by itself. Drying is accelerated only locally, and only when
+ * the brush must come back to an area that is still wet (a crisp detail over
+ * a wash), as a painter would. States are derived from the water field and
+ * the last time a tile was touched:
  *   fresh (just applied) · wet · drying · dry (stable, never resimulated)
  */
 
@@ -17,28 +18,31 @@ export class DryingModel {
 
 	setDuration( duration ) {
 		this.duration = duration;
-		this.compression = Math.min( 6, Math.max( 0.6, 600 / duration ) );
 	}
 
-	/** Evaporation multiplier for the current point of the timeline. */
-	evapScale( progress, finishing ) {
-		if ( finishing ) {
-			return 8;
-		}
-		// The last stage dries the sheet so it stabilises before the end.
-		return this.compression * ( progress > 0.95 ? 2.5 : 1 );
+	/** Evaporation is natural everywhere; no global acceleration. */
+	evapScale() {
+		return 1;
 	}
 
 	/** Seconds of painting time to wait before re-checking a wet region. */
 	retryDelay() {
-		return 1.5 / this.compression;
+		return 1;
+	}
+
+	/**
+	 * The brush needs to return to (x, y) but it is still wet: dry just that
+	 * spot faster for a couple of seconds.
+	 */
+	helpDry( model, x, y, r ) {
+		model.addDryZone( x, y, Math.max( 3, r * 1.6 ), 2.5 );
 	}
 
 	stateAt( model, x, y ) {
 		const i = Math.round( y ) * model.W + Math.round( x );
 		const h = model.h[ i ];
 		const t = model.tileTouch[ model.tileOf( x, y ) ];
-		if ( model.time - t < 1.2 / this.compression && h > 0.05 ) {
+		if ( model.time - t < 1.2 && h > 0.05 ) {
 			return STATE.FRESH;
 		}
 		if ( h > 0.15 ) {

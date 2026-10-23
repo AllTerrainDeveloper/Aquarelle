@@ -84,13 +84,21 @@ const fmt = ( s ) => {
 const setStatus = ( t ) => ( $( 'status' ).textContent = t );
 const srcSize = ( s ) => [ s.naturalWidth || s.width, s.naturalHeight || s.height ];
 
+/**
+ * Fine-detail levels: grid resolution, how many detail strokes the hand
+ * makes, and how small they get. Higher levels keep text and logos legible.
+ */
+const DETAIL = [
+	{ name: 'Soft', res: 300, strokes: 0.6, fine: 1.25 },
+	{ name: 'Balanced', res: 400, strokes: 1, fine: 1 },
+	{ name: 'Fine', res: 520, strokes: 1.7, fine: 0.75 },
+	{ name: 'Very fine', res: 640, strokes: 2.4, fine: 0.6 },
+	{ name: 'Maximum', res: 800, strokes: 3.2, fine: 0.5 },
+];
+const detailLevel = () => DETAIL[ Number( $( 'detail' ).value ) ] || DETAIL[ 1 ];
+
 function simResolution() {
-	const q = $( 'quality' ).value;
-	if ( 'auto' !== q ) {
-		return Number( q );
-	}
-	const cores = navigator.hardwareConcurrency || 4;
-	return cores >= 8 ? 400 : cores >= 4 ? 340 : 280;
+	return detailLevel().res;
 }
 
 /** Paper height at simulation resolution, matching the renderer's mapping. */
@@ -252,7 +260,7 @@ async function analyze() {
 		return g.getImageData( 0, 0, w, h ).data;
 	};
 	const pixels = grab( W, H );
-	const rs = Math.min( 1, ( 2 * res ) / Math.max( sw, sh ) );
+	const rs = Math.min( 1, Math.min( 1200, 2 * res ) / Math.max( sw, sh ) );
 	const refW = Math.max( W, Math.round( sw * rs ) );
 	const refH = Math.max( H, Math.round( sh * rs ) );
 	const refPixels = grab( refW, refH );
@@ -264,7 +272,7 @@ async function analyze() {
 	const t0 = performance.now();
 	let r;
 	try {
-		r = await call( 'analyze', { width: W, height: H, pixels: pixels.buffer, refW, refH, refPixels: refPixels.buffer, K, seed, duration }, [
+		r = await call( 'analyze', { width: W, height: H, pixels: pixels.buffer, refW, refH, refPixels: refPixels.buffer, K, seed, duration, detail: { strokes: detailLevel().strokes, fine: detailLevel().fine } }, [
 			pixels.buffer,
 			refPixels.buffer,
 		] );
@@ -276,13 +284,14 @@ async function analyze() {
 	const wall = performance.now() - t0;
 	await paperReady;
 	const an = r.analysis;
-	const model = new PigmentModel( { W, H, pigments: an.pigments, T: an.T, paper: paperAtSim( W, H ) } );
+	const model = new PigmentModel( { W, H, pigments: an.pigments, T: an.T, paper: paperAtSim( W, H ), reserve: an.reserve } );
 	const drying = new DryingModel( duration );
 	const splash = new SplashGenerator( model, an, drying );
 	splash.complexity = adaptive.q.complexity;
 	const animator = new GestureAnimator( model, an.pigments );
 	animator.showGestures = $( 'hand' ).checked;
-	splash.animator = animator;
+	// ?instant=1 (QA): deposits apply immediately without the animated hand.
+	splash.animator = params.get( 'instant' ) ? null : animator;
 	animation.overlay = $( 'overlay' ).getContext( '2d' );
 	renderer.setup( W, H );
 	session = { an, plan: r.plan, model, drying, splash, animator, baseline: r.baseline, timings: r.timings, wall, W, H, refW, refH, seed, K, duration };
@@ -323,7 +332,13 @@ $( 'pigments' ).addEventListener( 'input', ( e ) => {
 		$( 'analyze' ).classList.add( 'attention' );
 	}
 } );
-for ( const id of [ 'duration', 'seed', 'quality' ] ) {
+$( 'detail' ).addEventListener( 'input', ( e ) => {
+	$( 'detailOut' ).textContent = DETAIL[ Number( e.target.value ) ].name;
+	if ( session ) {
+		$( 'analyze' ).classList.add( 'attention' );
+	}
+} );
+for ( const id of [ 'duration', 'seed' ] ) {
 	$( id ).addEventListener( 'change', () => session && $( 'analyze' ).classList.add( 'attention' ) );
 }
 $( 'dice' ).addEventListener( 'click', () => {
