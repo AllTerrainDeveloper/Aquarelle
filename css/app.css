@@ -251,7 +251,20 @@ button.attention {
 
 .swatch {
 	padding: 0;
-	cursor: pointer;
+	cursor: grab;
+	touch-action: none;
+	user-select: none;
+}
+
+.swatch-ghost {
+	position: fixed;
+	z-index: 10;
+	width: 26px;
+	height: 26px;
+	border-radius: 50%;
+	border: 2px solid var(--panel);
+	box-shadow: 0 4px 14px rgba(0, 0, 0, 0.35);
+	pointer-events: none;
 }
 
 .swatch:disabled {

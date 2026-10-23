@@ -320,7 +320,9 @@ export class SplashGenerator {
 	 */
 	_brushAlong( rng, op, k, delay = 0 ) {
 		const anim = this.animator;
-		if ( anim && anim.brushFreeAt - this.now > 3 ) {
+		// Object washes are never skipped: they queue and the timeline waits.
+		// Optional fine work is let go when the hand is far behind.
+		if ( anim && 'sweep' !== op.type && anim.brushFreeAt - this.now > 3 ) {
 			return null;
 		}
 		const pts = op.path;

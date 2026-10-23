@@ -67,8 +67,9 @@ animated hand; `?bench=1&benchSpeed=16&benchRt=20` runs the benchmark
    need, so pigment overshoot only comes from flow; dark mistakes are
    corrected by lifting.
 3a. **Object by object, like a painter.** The big segmented areas (sky,
-   hair, face, coat) are the objects. They are painted light to dark and
-   background to front, each in one go: cut in the edge with one
+   hair, face, coat) are the objects. They are painted biggest first (the
+   large masses), then light to dark, each in one go: a few big drops of
+   its colour are poured in, then the brush pulls them out: cut in the edge with one
    continuous stroke that follows the contour (only where the image has a
    real edge), then carry a *graded* wash across the inside in gently
    wavering rows, top to bottom, with rounded turns, the tone following
@@ -205,7 +206,7 @@ reference.
   target. The frame interleaves due ops and fixed 1/30 s steps until it
   reaches the target or exhausts its budget (7 ms at level 0, plus 3 ms
   for gesture deposits). Rendering happens every frame regardless.
-- Duration is a parameter (minutes; default 10). The planner lays every
+- Duration is a slider (1–30 minutes; default 10). The planner lays every
   stage out over the chosen duration and sizes brushwork to it.
 - Drying is natural everywhere. It is accelerated only locally, when the
   brush must return to a spot that is still wet; the stroke is re-scheduled

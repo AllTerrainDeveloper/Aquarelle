@@ -59,7 +59,7 @@ export class AnimationController {
 		this.finishing = false;
 		// Step-back passes: moments when the painter looks at the sheet and
 		// fills what is still bare.
-		this.gapPasses = [ 0.55, 0.8, 0.93 ];
+		this.gapPasses = [ 0.6, 0.88 ];
 		this.gapStrokes = 0;
 		this.state = 'ready';
 		this.adaptive.reset();
@@ -281,7 +281,7 @@ export class AnimationController {
 		const u = this.gapPasses.shift();
 		const window = ( ( this.gapPasses[ 0 ] ?? 0.99 ) - u ) * this.duration * 0.85;
 		const ops = planGapStrokes( this.model, this.an, {
-			budget: Math.max( 8, window * 0.9 ),
+			budget: Math.max( 6, window * 0.55 ),
 			seed: ( this.plan.ops.length * 7919 + Math.round( u * 1000 ) ) >>> 0,
 			handX: this.splash.handX,
 			handY: this.splash.handY,

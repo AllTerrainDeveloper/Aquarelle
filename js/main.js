@@ -272,7 +272,7 @@ async function analyze() {
 	const refPixels = grab( refW, refH );
 	const K = Number( $( 'pigments' ).value );
 	const seed = Number( $( 'seed' ).value ) >>> 0;
-	const minutes = Math.min( 60, Math.max( 0.5, Number( $( 'duration' ).value ) || 10 ) );
+	const minutes = Math.min( 30, Math.max( 1, Number( $( 'duration' ).value ) || 10 ) );
 	const duration = minutes * 60;
 	setStatus( `Analyzing ${ W }×${ H } in a background worker…` );
 	const t0 = performance.now();
@@ -325,41 +325,88 @@ async function analyze() {
 			: `${ p.hex } — click to remove, or drag onto another colour to turn it into that one`;
 		d.setAttribute( 'aria-label', d.title );
 		d.disabled = p.isPaper;
-		d.draggable = ! p.isPaper && ! p.excluded && ! mapped;
-		d.addEventListener( 'click', () => {
-			if ( remap.has( idx ) ) {
-				remap.delete( idx );
-			} else if ( excluded.has( idx ) ) {
-				excluded.delete( idx );
-			} else {
-				excluded.add( idx );
+		d.dataset.idx = String( idx );
+		const canDrag = ! p.isPaper && ! p.excluded && ! mapped;
+		// Pointer-based drag (works with mouse and touch, in every browser):
+		// press a colour, move, release over another colour to paint it as
+		// that one. A press without movement is a click.
+		d.addEventListener( 'pointerdown', ( e ) => {
+			if ( p.isPaper ) {
+				return;
 			}
-			analyze();
-		} );
-		d.addEventListener( 'dragstart', ( e ) => {
-			e.dataTransfer.setData( 'text/plain', String( idx ) );
-			e.dataTransfer.effectAllowed = 'move';
-		} );
-		d.addEventListener( 'dragover', ( e ) => {
-			if ( ! p.excluded && ! mapped ) {
-				e.preventDefault();
-				d.classList.add( 'target' );
-			}
-		} );
-		d.addEventListener( 'dragleave', () => d.classList.remove( 'target' ) );
-		d.addEventListener( 'drop', ( e ) => {
 			e.preventDefault();
-			d.classList.remove( 'target' );
-			const from = Number( e.dataTransfer.getData( 'text/plain' ) );
-			if ( Number.isInteger( from ) && from !== idx ) {
-				// Anything already turned into `from` now follows it to `idx`.
-				for ( const [ a, b ] of remap ) {
-					if ( b === from ) {
-						remap.set( a, idx );
-					}
+			const sx = e.clientX;
+			const sy = e.clientY;
+			let ghost = null;
+			let over = null;
+			const move = ( ev ) => {
+				if ( ! ghost && canDrag && Math.hypot( ev.clientX - sx, ev.clientY - sy ) > 5 ) {
+					ghost = document.createElement( 'div' );
+					ghost.className = 'swatch-ghost';
+					ghost.style.background = p.hex;
+					document.body.appendChild( ghost );
 				}
-				remap.set( from, idx );
-				excluded.delete( from );
+				if ( ! ghost ) {
+					return;
+				}
+				ghost.style.left = ev.clientX - 13 + 'px';
+				ghost.style.top = ev.clientY - 13 + 'px';
+				const el = document.elementFromPoint( ev.clientX, ev.clientY );
+				const t = el && el.closest ? el.closest( '#swatches .swatch' ) : null;
+				const ok = t && t !== d && ! t.classList.contains( 'excluded' ) && ! t.classList.contains( 'mapped' ) && ! t.disabled;
+				if ( over && over !== t ) {
+					over.classList.remove( 'target' );
+				}
+				over = ok ? t : null;
+				if ( over ) {
+					over.classList.add( 'target' );
+				}
+			};
+			const up = () => {
+				window.removeEventListener( 'pointermove', move );
+				window.removeEventListener( 'pointerup', up );
+				window.removeEventListener( 'pointercancel', up );
+				if ( ghost ) {
+					ghost.remove();
+					if ( over ) {
+						over.classList.remove( 'target' );
+						const to = Number( over.dataset.idx );
+						// Anything already turned into this colour now follows it.
+						for ( const [ a, b ] of remap ) {
+							if ( b === idx ) {
+								remap.set( a, to );
+							}
+						}
+						remap.set( idx, to );
+						excluded.delete( idx );
+						analyze();
+					}
+					return;
+				}
+				// A click: restore a transformed/removed colour, or remove it.
+				if ( remap.has( idx ) ) {
+					remap.delete( idx );
+				} else if ( excluded.has( idx ) ) {
+					excluded.delete( idx );
+				} else {
+					excluded.add( idx );
+				}
+				analyze();
+			};
+			window.addEventListener( 'pointermove', move );
+			window.addEventListener( 'pointerup', up );
+			window.addEventListener( 'pointercancel', up );
+		} );
+		d.addEventListener( 'keydown', ( e ) => {
+			if ( 'Enter' === e.key || ' ' === e.key ) {
+				e.preventDefault();
+				if ( remap.has( idx ) ) {
+					remap.delete( idx );
+				} else if ( excluded.has( idx ) ) {
+					excluded.delete( idx );
+				} else {
+					excluded.add( idx );
+				}
 				analyze();
 			}
 		} );
@@ -391,6 +438,9 @@ $( 'pigments' ).addEventListener( 'input', ( e ) => {
 	if ( session ) {
 		$( 'analyze' ).classList.add( 'attention' );
 	}
+} );
+$( 'duration' ).addEventListener( 'input', ( e ) => {
+	$( 'durOut' ).textContent = e.target.value + ' min';
 } );
 $( 'detail' ).addEventListener( 'input', ( e ) => {
 	$( 'detailOut' ).textContent = DETAIL[ Number( e.target.value ) ].name;

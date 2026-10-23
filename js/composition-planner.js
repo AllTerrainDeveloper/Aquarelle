@@ -750,9 +750,9 @@ export function planComposition( an, { duration, seed, density = 1, fineDetail =
 		ob.main = main;
 		ob.sums = sums;
 		const border = reg.minX <= 1 || reg.minY <= 1 || reg.maxX >= W - 2 || reg.maxY >= H - 2;
-		// Light to dark above all (later, darker washes cover earlier overlaps),
-		// then background before subject, big before small.
-		ob.key = ( 1 - pigments[ main ].L ) + 0.3 * reg.importance - ( border ? 0.2 : 0 ) - 0.3 * ( reg.area / N );
+		// Biggest colour areas first, as a painter lays in the big masses; then
+		// light before dark and background before subject.
+		ob.key = -3 * ( reg.area / N ) + 0.5 * ( 1 - pigments[ main ].L ) + 0.2 * reg.importance - ( border ? 0.1 : 0 );
 	}
 	const pending = objects.map( ( o, n ) => n ).sort( ( a, b ) => objects[ a ].key - objects[ b ].key );
 	const sequence = [];
@@ -829,7 +829,7 @@ export function planComposition( an, { duration, seed, density = 1, fineDetail =
 				secs += 0.45 + st.len / speedOf( w );
 			}
 			total += secs;
-			plan.push( { o, cells, w, strokes, secs } );
+			plan.push( { o, own, cells, w, strokes, secs } );
 		}
 		if ( total <= window * 0.92 ) {
 			break;
@@ -841,6 +841,35 @@ export function planComposition( an, { duration, seed, density = 1, fineDetail =
 		const ob = objects[ item.o ];
 		const main = ob.main;
 		const stage = tc < duration * 0.17 ? 0 : tc < duration * 0.36 ? 1 : 2;
+		// Pour first: a few big drops of the object's colour land inside it
+		// (sized to fit), then the brush pulls them out into the wash.
+		{
+			const m = new Uint8Array( N );
+			for ( const i of item.own ) {
+				m[ i ] = 1;
+			}
+			const pours = packDiscs( m, depthInside( m, W, H, B ), new Uint8Array( N ), { W, H, maxR: B * 0.09, minR: B * 0.025, jitter: 0.3, seam: 0, rng, limit: 2 + rng.int( 3 ) } );
+			for ( const d of pours ) {
+				fixedOps.push( {
+					type: 'wash',
+					k: main,
+					x: d.x,
+					y: d.y,
+					r: d.fit / 1.25,
+					fit: d.fit,
+					drop: true,
+					level: 1,
+					amount: 0.35,
+					water: rng.range( 0.8, 1.0 ),
+					chaos: 0.2,
+					stage,
+					t: tc,
+					seed: rng.u32(),
+					fixed: true,
+				} );
+				tc += rng.range( 0.5, 0.9 );
+			}
+		}
 		for ( const st of item.strokes ) {
 			const secs = 0.45 + st.len / speedOf( item.w );
 			fixedOps.push( {
@@ -873,17 +902,17 @@ export function planComposition( an, { duration, seed, density = 1, fineDetail =
 			if ( pigments[ k ].isPaper ) {
 				continue;
 			}
-			// The graded wash carries the main colour's values; only clearly
-			// present secondary colours are charged in.
+			// Secondary colours, and the darker side of the main colour, are
+			// dropped into the wet wash.
 			const isMain = k === main;
-			if ( isMain || ob.sums[ k ] < 0.25 * ob.sums[ main ] ) {
+			if ( ! isMain && ob.sums[ k ] < 0.15 * ob.sums[ main ] ) {
 				continue;
 			}
 			const sub = new Uint8Array( N );
 			let cnt = 0;
 			for ( const i of ob.cells ) {
 				const v = T[ 0 ][ k ][ i ];
-				if ( isMain ? v > meanMain * 1.25 : v >= 0.35 * bestT[ i ] && v > 0.05 ) {
+				if ( isMain ? v > meanMain * 1.2 : v >= 0.35 * bestT[ i ] && v > 0.05 ) {
 					sub[ i ] = 1;
 					cnt++;
 				}
@@ -891,7 +920,7 @@ export function planComposition( an, { duration, seed, density = 1, fineDetail =
 			if ( cnt < 8 ) {
 				continue;
 			}
-			for ( const d of packDiscs( sub, depthInside( sub, W, H, B ), new Uint8Array( N ), { W, H, maxR: B * 0.045, minR: B * 0.01, jitter: 0.25, seam: 0, rng, limit: 3 } ) ) {
+			for ( const d of packDiscs( sub, depthInside( sub, W, H, B ), new Uint8Array( N ), { W, H, maxR: B * 0.06, minR: B * 0.012, jitter: 0.25, seam: 0, rng, limit: isMain ? 3 : 5 } ) ) {
 				charges.push( { k, d } );
 			}
 		}
@@ -1041,9 +1070,13 @@ export function planComposition( an, { duration, seed, density = 1, fineDetail =
 	}
 	// Most visible shapes first, within the time one hand has in this stage.
 	shapes.sort( ( a, b ) => b.mass - a.mass );
-	const handSeconds = ( STAGES[ 4 ].t1 - STAGES[ 4 ].t0 ) * duration * 0.85 * fineDetail.strokes * density;
+	const handSeconds = ( STAGES[ 4 ].t1 - STAGES[ 4 ].t0 ) * duration * 0.5 * fineDetail.strokes * density;
 	let used = 0;
 	for ( const sh of shapes ) {
+		// No fiddly dabs: a detail stroke must be a real stroke.
+		if ( sh.st.len < Math.max( 3 * sh.st.r, B * 0.02 ) ) {
+			continue;
+		}
 		const secs = 0.55 + sh.st.len / ( B * 0.3 );
 		if ( used + secs > handSeconds ) {
 			continue;
@@ -1216,7 +1249,7 @@ export function planComposition( an, { duration, seed, density = 1, fineDetail =
 
 	/* Correction slots, denser toward the end ------------------------- */
 	// Corrections share the same hand: keep them within its pace too.
-	const nC = Math.min( Math.round( ops.length * 0.38 ), Math.round( 0.67 * duration * 0.35 * Math.sqrt( fineDetail.strokes ) ) );
+	const nC = Math.min( Math.round( ops.length * 0.2 ), Math.round( 0.41 * duration * 0.12 * Math.sqrt( fineDetail.strokes ) ) );
 	for ( let j = 0; j < nC; j++ ) {
 		const u = ( j + rng.float() ) / nC;
 		const t = duration * ( 0.56 + 0.41 * Math.pow( u, 0.85 ) );
@@ -1446,7 +1479,7 @@ export function planGapStrokes( model, an, { budget, seed, handX, handY } ) {
 			if ( cells.length < 4 ) {
 				continue;
 			}
-			const strokes = centrelineStrokes( cells, W );
+			const strokes = centrelineStrokes( cells, W ).filter( ( st ) => st.len >= Math.max( 3 * st.r, B * 0.02 ) );
 			for ( const st of strokes ) {
 				pieces.push( {
 					type: 'detail',
