@@ -13,6 +13,7 @@
 
 import { Rng } from './prng.js';
 import { brushPath } from './gesture-animator.js';
+import { boxBlur } from './image-analyzer.js';
 
 const PROFILE_N = 64;
 
@@ -27,7 +28,11 @@ export class SplashGenerator {
 		this.loaded = -1;
 		this.handX = analysis.W / 2;
 		this.handY = analysis.H / 2;
-
+		// In a photo, where a colour belongs is judged over a small
+		// neighbourhood: a field strewn with flowers is still a green field.
+		const { W, H, B } = analysis;
+		const r = Math.max( 1, Math.round( B / 80 ) );
+		this.belongT = analysis.photo ? model.T[ 0 ].map( ( m ) => boxBlur( m, W, H, r ) ) : model.T[ 0 ];
 	}
 
 	_profile( rng, amp ) {
@@ -65,11 +70,12 @@ export class SplashGenerator {
 		const i = this._idx( x, y );
 		// Compare how much of each pigment the spot calls for (not how dark each
 		// one is), so a light main colour is not overruled by a strong accent.
+		const T = this.belongT;
 		let best = 0;
 		for ( let j = 0; j < m.K; j++ ) {
-			best = Math.max( best, m.T[ 0 ][ j ][ i ] );
+			best = Math.max( best, T[ j ][ i ] );
 		}
-		return best > 0 && m.T[ 0 ][ k ][ i ] >= 0.35 * best;
+		return best > 0 && T[ k ][ i ] >= 0.35 * best;
 	}
 
 	/** Distance (cells) from (x, y) to the nearest border between areas. */
@@ -621,9 +627,11 @@ export class SplashGenerator {
 					return true;
 				}
 				const anim = this.animator;
-				const approach = 0.22;
+				// A tiny spot is a quick dab; a big blot takes its time.
+				const u = Math.min( 1, r / ( this.an.B * 0.02 ) );
+				const approach = 0.1 + 0.12 * u;
 				const start = Math.max( this.now, anim.brushFreeAt + approach );
-				const dur = 0.7;
+				const dur = 0.25 + 0.45 * u;
 				anim.brushFreeAt = start + dur + approach;
 				const dir = rng.range( 0, Math.PI * 2 );
 				anim.add( {

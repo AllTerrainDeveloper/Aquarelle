@@ -27,6 +27,14 @@
 			<div id="swatches" class="swatches" aria-label="Palette: click a colour to remove it, drag it onto another to turn it into that one"></div>
 			<p class="muted small">Click a colour to remove it, or drag it onto another.</p>
 			<div class="field">
+				<label for="style">Image type</label>
+				<select id="style">
+					<option value="auto">Auto</option>
+					<option value="photo">Photo</option>
+					<option value="illustration">Illustration</option>
+				</select>
+			</div>
+			<div class="field">
 				<label for="pigments">Colours <output id="pigOut">8</output></label>
 				<input type="range" id="pigments" min="3" max="16" value="8">
 			</div>

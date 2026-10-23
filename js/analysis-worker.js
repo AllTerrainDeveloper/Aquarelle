@@ -33,6 +33,7 @@ self.onmessage = ( e ) => {
 					seed: msg.seed,
 					exclude: msg.exclude || [],
 					remap: msg.remap || [],
+					style: msg.style || 'auto',
 				} );
 				const t1 = performance.now();
 				// The worker keeps its own copies of what layer planning reads; the

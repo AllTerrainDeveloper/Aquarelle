@@ -312,6 +312,148 @@ function kmeans( lab, N, K, rng ) {
 }
 
 /* ------------------------------------------------------------------ */
+/* Photographs                                                          */
+/* ------------------------------------------------------------------ */
+
+/**
+ * How much fine texture the image has (0 = flat illustration, ~0.25 = a
+ * photograph): the share of pixels with a small, non-edge lightness wobble
+ * (foliage, grain, sensor noise). Flat artwork scores below ~0.08.
+ */
+export function textureScore( lab, W, H ) {
+	let tex = 0;
+	let n = 0;
+	for ( let y = 1; y < H - 1; y++ ) {
+		for ( let x = 1; x < W - 1; x++ ) {
+			const i = y * W + x;
+			const c = lab[ i * 3 ];
+			const lap = Math.abs( 4 * c - lab[ ( i - 1 ) * 3 ] - lab[ ( i + 1 ) * 3 ] - lab[ ( i - W ) * 3 ] - lab[ ( i + W ) * 3 ] ) / 4;
+			n++;
+			if ( lap > 0.009 && lap < 0.07 ) {
+				tex++;
+			}
+		}
+	}
+	return n ? tex / n : 0;
+}
+
+/**
+ * Simplifies a photograph into the shapes a painter would see: repeated
+ * edge-preserving (bilateral) smoothing in OKLab flattens texture and noise
+ * inside areas while keeping the edges between them. Updates lab and lin.
+ */
+function simplifyPhoto( lab, lin, W, H, B ) {
+	const N = W * H;
+	const r = Math.max( 2, Math.round( B / 140 ) );
+	const ss = 2 * ( r * 0.8 ) ** 2;
+	const sr = 2 * 0.05 ** 2;
+	const spatial = [];
+	for ( let dy = -r; dy <= r; dy++ ) {
+		for ( let dx = -r; dx <= r; dx++ ) {
+			if ( dx * dx + dy * dy <= r * r ) {
+				spatial.push( dx, dy, Math.exp( -( dx * dx + dy * dy ) / ss ) );
+			}
+		}
+	}
+	let src = lab;
+	let dst = new Float32Array( N * 3 );
+	for ( let iter = 0; iter < 4; iter++ ) {
+		for ( let y = 0; y < H; y++ ) {
+			for ( let x = 0; x < W; x++ ) {
+				const i = ( y * W + x ) * 3;
+				const l0 = src[ i ];
+				const a0 = src[ i + 1 ];
+				const b0 = src[ i + 2 ];
+				let sw = 0;
+				let sl = 0;
+				let sa = 0;
+				let sb = 0;
+				for ( let s = 0; s < spatial.length; s += 3 ) {
+					const xx = x + spatial[ s ];
+					const yy = y + spatial[ s + 1 ];
+					if ( xx < 0 || yy < 0 || xx >= W || yy >= H ) {
+						continue;
+					}
+					const j = ( yy * W + xx ) * 3;
+					const dl = src[ j ] - l0;
+					const da = src[ j + 1 ] - a0;
+					const db = src[ j + 2 ] - b0;
+					const w = spatial[ s + 2 ] * Math.exp( -( dl * dl + da * da + db * db ) / sr );
+					sw += w;
+					sl += w * src[ j ];
+					sa += w * src[ j + 1 ];
+					sb += w * src[ j + 2 ];
+				}
+				dst[ i ] = sl / sw;
+				dst[ i + 1 ] = sa / sw;
+				dst[ i + 2 ] = sb / sw;
+			}
+		}
+		const t = src === lab ? new Float32Array( N * 3 ) : src;
+		src = dst;
+		dst = t;
+	}
+	lab.set( src );
+	const tmp = [ 0, 0, 0 ];
+	for ( let i = 0; i < N; i++ ) {
+		oklabToLinear( lab[ i * 3 ], lab[ i * 3 + 1 ], lab[ i * 3 + 2 ], tmp );
+		lin[ i * 3 ] = Math.max( 0, tmp[ 0 ] );
+		lin[ i * 3 + 1 ] = Math.max( 0, tmp[ 1 ] );
+		lin[ i * 3 + 2 ] = Math.max( 0, tmp[ 2 ] );
+	}
+}
+
+/**
+ * Smooths scalar maps inside the shapes of a guide image (joint bilateral):
+ * neighbours of a similar colour are averaged, across an edge they are not.
+ * Used on a photograph's pigment maps so each colour forms continuous areas
+ * instead of a per-pixel speckle of alternating mixes.
+ */
+function smoothInShapes( fields, lab, W, H, r, sigmaR, iterations ) {
+	const ss = 2 * ( r * 0.8 ) ** 2;
+	const sr = 2 * sigmaR * sigmaR;
+	const offs = [];
+	for ( let dy = -r; dy <= r; dy++ ) {
+		for ( let dx = -r; dx <= r; dx++ ) {
+			if ( dx * dx + dy * dy <= r * r ) {
+				offs.push( dx, dy, Math.exp( -( dx * dx + dy * dy ) / ss ) );
+			}
+		}
+	}
+	const tmp = new Float32Array( W * H );
+	for ( const f of fields ) {
+		for ( let iter = 0; iter < iterations; iter++ ) {
+			for ( let y = 0; y < H; y++ ) {
+				for ( let x = 0; x < W; x++ ) {
+					const i = y * W + x;
+					const l0 = lab[ i * 3 ];
+					const a0 = lab[ i * 3 + 1 ];
+					const b0 = lab[ i * 3 + 2 ];
+					let sw = 0;
+					let sv = 0;
+					for ( let s = 0; s < offs.length; s += 3 ) {
+						const xx = x + offs[ s ];
+						const yy = y + offs[ s + 1 ];
+						if ( xx < 0 || yy < 0 || xx >= W || yy >= H ) {
+							continue;
+						}
+						const j = yy * W + xx;
+						const dl = lab[ j * 3 ] - l0;
+						const da = lab[ j * 3 + 1 ] - a0;
+						const db = lab[ j * 3 + 2 ] - b0;
+						const w = offs[ s + 2 ] * Math.exp( -( dl * dl + da * da + db * db ) / sr );
+						sw += w;
+						sv += w * f[ j ];
+					}
+					tmp[ i ] = sv / sw;
+				}
+			}
+			f.set( tmp );
+		}
+	}
+}
+
+/* ------------------------------------------------------------------ */
 /* Main analysis                                                        */
 /* ------------------------------------------------------------------ */
 
@@ -334,7 +476,7 @@ export function pixelsToLabLinear( pixels, n ) {
 	return { lin, lab };
 }
 
-export function analyzeImage( { width: W, height: H, pixels, K: K0, seed, exclude = [], remap = [] } ) {
+export function analyzeImage( { width: W, height: H, pixels, K: K0, seed, exclude = [], remap = [], style = 'auto' } ) {
 	const times = {};
 	let t = performance.now();
 	const mark = ( name ) => {
@@ -347,6 +489,13 @@ export function analyzeImage( { width: W, height: H, pixels, K: K0, seed, exclud
 	const rng = new Rng( seed ^ 0x5bd1e995 );
 
 	const { lin, lab } = pixelsToLabLinear( pixels, N );
+	// Photographs are first simplified into painterly shapes; flat artwork
+	// is painted as it is. 'auto' decides from the image's fine texture.
+	const texture = textureScore( lab, W, H );
+	const photo = 'photo' === style || ( 'auto' === style && texture > 0.12 );
+	if ( photo ) {
+		simplifyPhoto( lab, lin, W, H, B );
+	}
 	const L = channel( lab, 0, N );
 	mark( 'normalize' );
 
@@ -558,6 +707,10 @@ export function analyzeImage( { width: W, height: H, pixels, K: K0, seed, exclud
 		achievable[ i * 3 + 1 ] = xa * Aa[ 1 ] + xb * Ab[ 1 ];
 		achievable[ i * 3 + 2 ] = xa * Aa[ 2 ] + xb * Ab[ 2 ];
 		fitErr += bestErr;
+	}
+	if ( photo ) {
+		// A photo's mixes flip from pixel to pixel; let each colour form areas.
+		smoothInShapes( T0, lab, W, H, Math.max( 2, Math.round( B / 100 ) ), 0.08, 2 );
 	}
 	mark( 'decomposition' );
 
@@ -835,6 +988,8 @@ export function analyzeImage( { width: W, height: H, pixels, K: K0, seed, exclud
 		regionOf,
 		regions,
 		stats: { paletteDE, fitErr: fitErr / N, regions: regions.length, reserved: reserved / N },
+		photo,
+		texture,
 		times,
 	};
 }

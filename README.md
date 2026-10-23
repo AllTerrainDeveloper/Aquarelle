@@ -20,6 +20,18 @@ real time over the chosen duration; **Quick draw** plays the same painting,
 every drop, splash and stroke, time-lapsed into 20 seconds. Speed, seed and
 the reference view are under *More options*.
 
+**Photos:** *Image type* is detected automatically (shown as "Auto
+(photo)" or "Auto (illustration)") and can be forced. A photograph is
+painted the way a painter simplifies one: the image is first reduced to
+flat shapes (repeated edge-preserving smoothing in OKLab, and pigment maps
+smoothed within those shapes); the first wash goes down in broad colour
+zones (sky, glow, ground) instead of hundreds of small regions; mid-tones
+and glazes paint whole areas with their small holes closed (a field before
+its flowers, a building block before its windows); then the details layer
+lifts small spots that must be lighter (lit windows) with a damp brush and
+touches in their colour. Detection uses the share of pixels with fine,
+non-edge texture (photos ≈0.25–0.3, flat artwork < 0.08).
+
 **Palette editing:** after analysis, click a colour in the palette to remove
 it (the painter mixes that area from the remaining pigments), or drag a
 colour onto another to paint it as that colour (a recolour in OKLab that

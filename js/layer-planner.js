@@ -25,7 +25,7 @@
 
 import { Rng } from './prng.js';
 import { depthInside, packDiscs, sweepStrokes, spineStrokes } from './composition-planner.js';
-import { minFilter, maxFilter } from './image-analyzer.js';
+import { minFilter, maxFilter, boxBlur } from './image-analyzer.js';
 
 export const LAYERS = [
 	{ id: 'wash', name: 'First wash: light and loose', t0: 0.0, t1: 0.24 },
@@ -106,6 +106,20 @@ function layerTarget( ctx, layer ) {
 	return { target, dens };
 }
 
+/**
+ * Closes small holes and gaps in a mask (dilate, then erode): a photo's
+ * field strewn with flowers is washed as one field, the flowers come later.
+ */
+function closeMask( mask, W, H, r, reserve ) {
+	const f = Float32Array.from( mask );
+	const c = minFilter( maxFilter( f, W, H, r ), W, H, r );
+	const out = new Uint8Array( mask.length );
+	for ( let i = 0; i < mask.length; i++ ) {
+		out[ i ] = c[ i ] > 0.5 && ! reserve[ i ] ? 1 : 0;
+	}
+	return out;
+}
+
 /** Connected components (4-neighbour) of a mask, as lists of cells. */
 function components( mask, W, H, minSize ) {
 	const N = W * H;
@@ -183,6 +197,12 @@ function walk( items, hx, hy ) {
 	return out;
 }
 
+// A lift: approach, blot, leave (the hand is busy for all of it). A tiny
+// spot is a quick dab; must match the lift gesture in SplashGenerator.
+const liftSecs = ( B, r ) => {
+	const u = Math.min( 1, r / ( B * 0.02 ) );
+	return 0.25 + 0.45 * u + 2 * ( 0.1 + 0.12 * u );
+};
 const brushSpeed = ( B, w ) => Math.max( B * 0.35, w * 14 );
 // Real hand time: the stroke itself plus lifting, moving and landing again.
 const strokeSecs = ( B, st, w ) => 0.6 + st.len / brushSpeed( B, w );
@@ -234,7 +254,76 @@ export function planLayer( ctx, layer, state ) {
 			}
 		}
 		const plan = [];
-		for ( const reg of objs ) {
+		if ( an.photo ) {
+			// A photo has hundreds of small regions; the first wash is laid in
+			// broad zones instead (sky, glow, ground): each area takes the colour
+			// that dominates its neighbourhood.
+			const r = Math.max( 2, Math.round( B / 40 ) );
+			const blurred = [];
+			for ( let k = 0; k < K; k++ ) {
+				const f = new Float32Array( N );
+				if ( ! pigments[ k ].isPaper ) {
+					for ( let i = 0; i < N; i++ ) {
+						f[ i ] = need( k, i );
+					}
+				}
+				blurred.push( boxBlur( f, W, H, r ) );
+			}
+			const holeR = Math.max( 1, Math.round( B / 130 ) );
+			// Colours of one hue (light to dark browns) make one zone.
+			const hue = ( k ) => pigments[ k ].lab;
+			const fam = new Int16Array( K );
+			for ( let k = 0; k < K; k++ ) {
+				fam[ k ] = k;
+				for ( let h = 0; h < k; h++ ) {
+					if ( fam[ h ] === h && ! pigments[ h ].isPaper && Math.hypot( hue( k )[ 1 ] - hue( h )[ 1 ], hue( k )[ 2 ] - hue( h )[ 2 ] ) < 0.035 ) {
+						fam[ k ] = h;
+						break;
+					}
+				}
+			}
+			const zone = new Int16Array( N ).fill( -1 );
+			for ( let i = 0; i < N; i++ ) {
+				let best = -1;
+				let bv = 0.01;
+				for ( let k = 0; k < K; k++ ) {
+					if ( blurred[ k ][ i ] > bv ) {
+						bv = blurred[ k ][ i ];
+						best = k;
+					}
+				}
+				zone[ i ] = reserve[ i ] || best < 0 ? -1 : fam[ best ];
+			}
+			let zid = 0;
+			for ( let f = 0; f < K; f++ ) {
+				if ( fam[ f ] !== f ) {
+					continue;
+				}
+				let m = new Uint8Array( N );
+				for ( let i = 0; i < N; i++ ) {
+					m[ i ] = zone[ i ] === f ? 1 : 0;
+				}
+				m = closeMask( m, W, H, holeR, reserve );
+				for ( const cells of components( m, W, H, minObj ) ) {
+					const sums = new Float64Array( K );
+					for ( const i of cells ) {
+						for ( let q = 0; q < K; q++ ) {
+							sums[ q ] += need( q, i );
+						}
+					}
+					// The zone's own lightest version: the family colour it needs most.
+					let main = f;
+					for ( let q = 0; q < K; q++ ) {
+						if ( fam[ q ] === f && sums[ q ] > sums[ main ] ) {
+							main = q;
+						}
+					}
+					plan.push( { reg: { id: 9e5 + zid++ }, cells, own: cells, main, sums } );
+				}
+			}
+			plan.sort( ( a, b ) => b.cells.length - a.cells.length );
+		}
+		for ( const reg of an.photo ? [] : objs ) {
 			const cells = byReg.get( reg.id );
 			const sums = new Float64Array( K );
 			for ( const i of cells ) {
@@ -350,7 +439,9 @@ export function planLayer( ctx, layer, state ) {
 	} else if ( 1 === layer || 2 === layer ) {
 		/* Mid-tones / shadow glazes: one colour at a time ----------------- */
 		const glaze = 2 === layer;
-		const minShape = Math.max( 12, ( B * ( glaze ? 0.02 : 0.025 ) ) ** 2 );
+		// Photos: small shapes wait for the detail brush, as a painter
+		// simplifies; the washes go to the shapes that carry the picture.
+		const minShape = Math.max( 12, ( B * ( glaze ? 0.02 : 0.025 ) * ( an.photo ? 1.5 : 1 ) ) ** 2 );
 		const colours = [];
 		for ( let k = 0; k < K; k++ ) {
 			if ( pigments[ k ].isPaper ) {
@@ -366,7 +457,8 @@ export function planLayer( ctx, layer, state ) {
 					total += nd;
 				}
 			}
-			const shapes = components( mask, W, H, minShape ).map( ( cells ) => ( { cells, ...centroid( cells, W ) } ) );
+			const shapeMask = an.photo ? closeMask( mask, W, H, Math.max( 1, Math.round( B / 130 ) ), reserve ) : mask;
+			const shapes = components( shapeMask, W, H, minShape ).map( ( cells ) => ( { cells, ...centroid( cells, W ) } ) );
 			if ( shapes.length ) {
 				colours.push( { k, total, shapes } );
 			}
@@ -459,11 +551,63 @@ export function planLayer( ctx, layer, state ) {
 		}
 	} else if ( 3 === layer ) {
 		/* Darks & details: few, deliberate strokes ------------------------- */
+		// Light details inside big dark areas (lit windows in a block painted
+		// whole): watercolour cannot paint light over dark, so the painter
+		// lifts them out with a damp brush first, then touches in their colour.
+		const over = new Uint8Array( N );
+		for ( let i = 0; i < N; i++ ) {
+			over[ i ] = ! reserve[ i ] && room( i ) < -0.2 ? 1 : 0;
+		}
+		const lights = [];
+		for ( const cells of components( over, W, H, 2 ) ) {
+			if ( cells.length > ( B * 0.05 ) ** 2 ) {
+				// A bigger patch: blot it in several small lifts.
+				const pm = new Uint8Array( N );
+				for ( const i of cells ) {
+					pm[ i ] = 1;
+				}
+				for ( const d of packDiscs( pm, depthInside( pm, W, H, B ), new Uint8Array( N ), { W, H, maxR: B * 0.02, minR: 1, jitter: 0.2, seam: 1, rng, limit: 24 } ) ) {
+					const ii = Math.round( d.y ) * W + Math.round( d.x );
+					lights.push( { cells: [ ii ], x: d.x, y: d.y, r: d.fit, mass: importance[ ii ] * Math.min( 2, -room( ii ) ) * d.fit } );
+				}
+				continue;
+			}
+			let imp = 0;
+			let ex = 0;
+			for ( const i of cells ) {
+				imp += importance[ i ];
+				ex -= room( i );
+			}
+			const c = centroid( cells, W );
+			lights.push( { cells, ...c, r: Math.min( B * 0.03, Math.sqrt( cells.length / Math.PI ) + 0.8 ), mass: ( imp / cells.length ) * Math.min( 2, ex / cells.length ) * Math.sqrt( cells.length ) } );
+		}
+		lights.sort( ( a, b ) => b.mass - a.mass );
+		const lifted = new Uint8Array( N );
+		const liftBudget = window * 0.72 * 0.3 * ( ctx.fineDetail.strokes || 1 );
+		const pick = [];
+		let liftEnd = 0;
+		for ( const l of lights ) {
+			const secs = liftSecs( B, l.r );
+			if ( liftEnd + secs <= liftBudget ) {
+				liftEnd += secs;
+				pick.push( l );
+			}
+		}
+		let lt = 0.3;
+		for ( const l of walk( pick, hx, hy ) ) {
+			for ( const i of l.cells ) {
+				lifted[ i ] = 1;
+			}
+			ops.push( { type: 'lift', x: l.x, y: l.y, r: l.r, strength: 0.8, seed: rng.u32(), chaos: 0.1, t: lt } );
+			lt += liftSecs( B, l.r );
+			hx = l.x;
+			hy = l.y;
+		}
 		// Shapes across colours (a brow mixing two darks is one shape); the
 		// main pigment paints its spine. Most visible first, within the time.
 		const mask = new Uint8Array( N );
 		for ( let i = 0; i < N; i++ ) {
-			if ( reserve[ i ] || room( i ) < 0.08 ) {
+			if ( reserve[ i ] || ( room( i ) < 0.08 && ! lifted[ i ] ) ) {
 				continue;
 			}
 			for ( let k = 0; k < K; k++ ) {
@@ -573,7 +717,7 @@ export function planLayer( ctx, layer, state ) {
 		shapes.sort( ( a, b ) => b.mass - a.mass );
 		const chosen = [];
 		let used = 0;
-		const budget = window * 0.72 * ( ctx.fineDetail.strokes || 1 );
+		const budget = window * 0.72 * ( ctx.fineDetail.strokes || 1 ) - liftEnd;
 		for ( const s of shapes ) {
 			if ( used + s.secs <= budget ) {
 				used += s.secs;
@@ -582,7 +726,7 @@ export function planLayer( ctx, layer, state ) {
 		}
 		// One colour at a time (light to dark), nearest next.
 		const order = [ ...new Set( chosen.map( ( s ) => s.k ) ) ].sort( ( a, b ) => pigments[ b ].L - pigments[ a ].L );
-		let t = 0.3;
+		let t = 0.3 + liftEnd;
 		for ( const k of order ) {
 			for ( const s of walk( chosen.filter( ( c ) => c.k === k ), hx, hy ) ) {
 				for ( const st of s.strokes ) {

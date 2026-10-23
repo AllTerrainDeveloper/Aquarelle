@@ -286,7 +286,7 @@ async function analyze() {
 	const t0 = performance.now();
 	let r;
 	try {
-		r = await call( 'analyze', { width: W, height: H, pixels: pixels.buffer, refW, refH, refPixels: refPixels.buffer, K, seed, duration, exclude: [ ...excluded ], remap: [ ...remap ], detail: { strokes: detailLevel().strokes, fine: detailLevel().fine } }, [
+		r = await call( 'analyze', { width: W, height: H, pixels: pixels.buffer, refW, refH, refPixels: refPixels.buffer, K, seed, duration, exclude: [ ...excluded ], remap: [ ...remap ], style: $( 'style' ).value, detail: { strokes: detailLevel().strokes, fine: detailLevel().fine } }, [
 			pixels.buffer,
 			refPixels.buffer,
 		] );
@@ -429,6 +429,8 @@ async function analyze() {
 	}
 	$( 'record' ).disabled = ! exporter.canRecord();
 	setPlayLabel();
+	// Auto shows what it detected.
+	$( 'style' ).options[ 0 ].textContent = `Auto (${ an.photo ? 'photo' : 'illustration' })`;
 	setStatus( 'Ready.' );
 	return session;
 }
@@ -454,7 +456,7 @@ $( 'duration' ).addEventListener( 'input', ( e ) => {
 $( 'detail' ).addEventListener( 'input', ( e ) => {
 	$( 'detailOut' ).textContent = DETAIL[ Number( e.target.value ) ].name;
 } );
-for ( const id of [ 'duration', 'detail', 'seed' ] ) {
+for ( const id of [ 'duration', 'detail', 'seed', 'style' ] ) {
 	$( id ).addEventListener( 'change', reanalyze );
 }
 $( 'dice' ).addEventListener( 'click', () => {
