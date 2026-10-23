@@ -523,8 +523,9 @@ export class SplashGenerator {
 					// Drops for open interiors; near borders the brush lays a cleaner edge.
 					if ( op.drop || ( ! op.brushOnly && op.fit >= B * 0.035 && rng.float() < 0.5 ) ) {
 						this._drop( rng, op, x, y, op.fit, k, {
-							crown: Math.round( 3 + ( op.fit / B ) * 90 ),
-							spray: op.drop && rng.float() < 0.5 ? rng.int( 8 ) : 0,
+							// A dab from the brush tip throws no droplets.
+							crown: op.dab ? 0 : Math.round( 3 + ( op.fit / B ) * 90 ),
+							spray: ! op.dab && op.drop && rng.float() < 0.5 ? rng.int( 8 ) : 0,
 							extra: { amp: 0.15, soft: op.soft ?? 0.45, aspect: rng.range( 1, 1.12 ) },
 							fit: op.fit,
 						} );

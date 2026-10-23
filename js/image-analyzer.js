@@ -482,6 +482,162 @@ function smoothInShapes( fields, lab, W, H, r, step, sigmaR, iterations ) {
 }
 
 /* ------------------------------------------------------------------ */
+/* A painter's palette for photographs                                  */
+/* ------------------------------------------------------------------ */
+
+/** Optical density (absorbance over paper) of a linear colour. */
+function opticalDensity( r, g, b, out ) {
+	out[ 0 ] = -Math.log( Math.min( 1, Math.max( 0.015, r / PAPER_LINEAR[ 0 ] ) ) );
+	out[ 1 ] = -Math.log( Math.min( 1, Math.max( 0.015, g / PAPER_LINEAR[ 1 ] ) ) );
+	out[ 2 ] = -Math.log( Math.min( 1, Math.max( 0.015, b / PAPER_LINEAR[ 2 ] ) ) );
+	return out;
+}
+
+/** Absorbance of a pigment whose masstone is this OKLab colour. */
+function pigmentAbsorbance( c ) {
+	const tmp = [ 0, 0, 0 ];
+	oklabToLinear( c[ 0 ], c[ 1 ], c[ 2 ], tmp );
+	return tmp.map( ( v, ch ) => -Math.log( Math.min( 0.999, Math.max( 0.03, Math.max( 0, Math.min( 1, v ) ) / PAPER_LINEAR[ ch ] ) ) ) );
+}
+
+/**
+ * Weighted least-squares fit of a density vector D by non-negative amounts
+ * of 1, 2 or 3 pigments (absorbances As). Returns the weighted error, and
+ * the amounts in x, or Infinity when the best fit needs a negative amount.
+ */
+function fitMix( As, D, w, x ) {
+	const n = As.length;
+	// Normal equations M x = c (n <= 3).
+	const M = [ 0, 0, 0, 0, 0, 0, 0, 0, 0 ];
+	const c = [ 0, 0, 0 ];
+	for ( let p = 0; p < n; p++ ) {
+		for ( let q = p; q < n; q++ ) {
+			const v = w[ 0 ] * As[ p ][ 0 ] * As[ q ][ 0 ] + w[ 1 ] * As[ p ][ 1 ] * As[ q ][ 1 ] + w[ 2 ] * As[ p ][ 2 ] * As[ q ][ 2 ];
+			M[ p * 3 + q ] = v;
+			M[ q * 3 + p ] = v;
+		}
+		c[ p ] = w[ 0 ] * As[ p ][ 0 ] * D[ 0 ] + w[ 1 ] * As[ p ][ 1 ] * D[ 1 ] + w[ 2 ] * As[ p ][ 2 ] * D[ 2 ];
+	}
+	if ( 1 === n ) {
+		x[ 0 ] = Math.min( MAX_DENSITY, Math.max( 0, c[ 0 ] / M[ 0 ] ) );
+	} else if ( 2 === n ) {
+		const det = M[ 0 ] * M[ 4 ] - M[ 1 ] * M[ 1 ];
+		if ( det < 1e-9 ) {
+			return Infinity;
+		}
+		x[ 0 ] = ( c[ 0 ] * M[ 4 ] - c[ 1 ] * M[ 1 ] ) / det;
+		x[ 1 ] = ( M[ 0 ] * c[ 1 ] - M[ 1 ] * c[ 0 ] ) / det;
+	} else {
+		const [ a, b, cc, d, e, f, g, h, k ] = M;
+		const A0 = e * k - f * h;
+		const A1 = -( d * k - f * g );
+		const A2 = d * h - e * g;
+		const det = a * A0 + b * A1 + cc * A2;
+		if ( Math.abs( det ) < 1e-12 ) {
+			return Infinity;
+		}
+		x[ 0 ] = ( A0 * c[ 0 ] + ( cc * h - b * k ) * c[ 1 ] + ( b * f - cc * e ) * c[ 2 ] ) / det;
+		x[ 1 ] = ( A1 * c[ 0 ] + ( a * k - cc * g ) * c[ 1 ] + ( cc * d - a * f ) * c[ 2 ] ) / det;
+		x[ 2 ] = ( A2 * c[ 0 ] + ( b * g - a * h ) * c[ 1 ] + ( a * e - b * d ) * c[ 2 ] ) / det;
+	}
+	let err = 0;
+	const r = [ D[ 0 ], D[ 1 ], D[ 2 ] ];
+	for ( let p = 0; p < n; p++ ) {
+		if ( x[ p ] < 0 ) {
+			return Infinity;
+		}
+		x[ p ] = Math.min( MAX_DENSITY, x[ p ] );
+		for ( let ch = 0; ch < 3; ch++ ) {
+			r[ ch ] -= x[ p ] * As[ p ][ ch ];
+		}
+	}
+	for ( let ch = 0; ch < 3; ch++ ) {
+		err += w[ ch ] * r[ ch ] * r[ ch ];
+	}
+	return err;
+}
+
+/**
+ * Picks K pigments for how well their mixes cover the picture, as a
+ * painter stocks a palette (a blue and a yellow make the greens), instead
+ * of the K most common colours (a big sky would take most of the slots).
+ * Greedy: each step adds the candidate whose own tints and two-pigment
+ * mixes with the pigments already chosen most reduce the colour error.
+ */
+function mixingPalette( candidates, lin, N, K, rng ) {
+	const S = Math.min( N, 3000 );
+	const Ds = [];
+	const ws = [];
+	const labs = [];
+	const D = [ 0, 0, 0 ];
+	for ( let s = 0; s < S; s++ ) {
+		const i = S === N ? s : rng.int( N );
+		opticalDensity( lin[ i * 3 ], lin[ i * 3 + 1 ], lin[ i * 3 + 2 ], D );
+		if ( D[ 0 ] + D[ 1 ] + D[ 2 ] < 0.03 ) {
+			continue;
+		}
+		Ds.push( [ D[ 0 ], D[ 1 ], D[ 2 ] ] );
+		ws.push( [ Math.exp( -D[ 0 ] ) + 0.06, Math.exp( -D[ 1 ] ) + 0.06, Math.exp( -D[ 2 ] ) + 0.06 ] );
+		const L = [ 0, 0, 0 ];
+		linearToOklab( lin[ i * 3 ], lin[ i * 3 + 1 ], lin[ i * 3 + 2 ], L );
+		labs.push( L );
+	}
+	// A mix is judged by how different it looks (OKLab), so a dark green is
+	// not an acceptable dark brown even though their densities are close.
+	const look = [ 0, 0, 0 ];
+	const seen = ( As, x, n, s ) => {
+		const o = [ 0, 0, 0 ];
+		for ( let p = 0; p < n; p++ ) {
+			for ( let ch = 0; ch < 3; ch++ ) {
+				o[ ch ] += x[ p ] * As[ p ][ ch ];
+			}
+		}
+		linearToOklab( PAPER_LINEAR[ 0 ] * Math.exp( -o[ 0 ] ), PAPER_LINEAR[ 1 ] * Math.exp( -o[ 1 ] ), PAPER_LINEAR[ 2 ] * Math.exp( -o[ 2 ] ), look );
+		const t = labs[ s ];
+		return ( look[ 0 ] - t[ 0 ] ) ** 2 + ( look[ 1 ] - t[ 1 ] ) ** 2 + ( look[ 2 ] - t[ 2 ] ) ** 2;
+	};
+	const mixErr = ( As, s, x ) => ( fitMix( As, Ds[ s ], ws[ s ], x ) < Infinity ? seen( As, x, As.length, s ) : Infinity );
+	const cand = candidates.map( ( c ) => ( { c, A: pigmentAbsorbance( c ) } ) ).filter( ( p ) => Math.max( ...p.A ) >= 0.06 );
+	// Error of each sample with the palette so far (bare paper to start).
+	const cur = Ds.map( ( d, s ) => seen( [], [], 0, s ) );
+	const chosen = [];
+	const x = [ 0, 0, 0 ];
+	while ( chosen.length < K && chosen.length < cand.length ) {
+		let best = -1;
+		let bestGain = -1;
+		let bestErr = null;
+		for ( let c = 0; c < cand.length; c++ ) {
+			if ( chosen.includes( c ) ) {
+				continue;
+			}
+			const err = new Float32Array( Ds.length );
+			let gain = 0;
+			for ( let s = 0; s < Ds.length; s++ ) {
+				let e = mixErr( [ cand[ c ].A ], s, x );
+				for ( const j of chosen ) {
+					e = Math.min( e, mixErr( [ cand[ c ].A, cand[ j ].A ], s, x ) );
+				}
+				err[ s ] = Math.min( cur[ s ], e );
+				gain += cur[ s ] - err[ s ];
+			}
+			if ( gain > bestGain ) {
+				bestGain = gain;
+				best = c;
+				bestErr = err;
+			}
+		}
+		if ( best < 0 ) {
+			break;
+		}
+		chosen.push( best );
+		for ( let s = 0; s < Ds.length; s++ ) {
+			cur[ s ] = bestErr[ s ];
+		}
+	}
+	return chosen.map( ( c ) => cand[ c ].c );
+}
+
+/* ------------------------------------------------------------------ */
 /* Main analysis                                                        */
 /* ------------------------------------------------------------------ */
 
@@ -580,7 +736,9 @@ export function analyzeImage( { width: W, height: H, pixels, K: K0, seed, exclud
 	mark( 'importance' );
 
 	/* Palette ------------------------------------------------------- */
-	const centers = kmeans( lab, N, K0, rng );
+	// Illustrations: their own flat colours. Photos: pigments chosen for how
+	// well they mix into the picture's colours.
+	const centers = photo ? mixingPalette( kmeans( lab, N, Math.min( 32, K0 * 3 ), rng ), lin, N, K0, rng ) : kmeans( lab, N, K0, rng );
 	centers.sort( ( a, b ) => b[ 0 ] - a[ 0 ] );
 	const tmp = [ 0, 0, 0 ];
 	const all = centers.map( ( c ) => {
@@ -725,15 +883,54 @@ export function analyzeImage( { width: W, height: H, pixels, K: K0, seed, exclud
 				}
 			}
 		}
+		let kc = -1;
+		let xc = 0;
+		if ( photo && active.length > 2 ) {
+			// A photo's palette is made to be mixed: try pairs and triples of
+			// the five pigments that fit best on their own.
+			const top = [ ...active ].sort( ( p, q ) => singles[ p * 2 + 1 ] - singles[ q * 2 + 1 ] ).slice( 0, 5 );
+			const Dv = [ D0, D1, D2 ];
+			const wv = [ w0, w1, w2 ];
+			const xv = [ 0, 0, 0 ];
+			for ( let p = 0; p < top.length; p++ ) {
+				for ( let q = p + 1; q < top.length; q++ ) {
+					const e2 = fitMix( [ pigments[ top[ p ] ].A, pigments[ top[ q ] ].A ], Dv, wv, xv ) * 1.04 + 1e-5;
+					if ( e2 < bestErr ) {
+						bestErr = e2;
+						ka = top[ p ];
+						kb = top[ q ];
+						kc = -1;
+						xa = xv[ 0 ];
+						xb = xv[ 1 ];
+					}
+					for ( let r = q + 1; r < top.length; r++ ) {
+						const e3 = fitMix( [ pigments[ top[ p ] ].A, pigments[ top[ q ] ].A, pigments[ top[ r ] ].A ], Dv, wv, xv ) * 1.08 + 2e-5;
+						if ( e3 < bestErr ) {
+							bestErr = e3;
+							ka = top[ p ];
+							kb = top[ q ];
+							kc = top[ r ];
+							xa = xv[ 0 ];
+							xb = xv[ 1 ];
+							xc = xv[ 2 ];
+						}
+					}
+				}
+			}
+		}
 		T0[ ka ][ i ] = xa;
 		if ( kb >= 0 ) {
 			T0[ kb ][ i ] = xb;
 		}
+		if ( kc >= 0 ) {
+			T0[ kc ][ i ] = xc;
+		}
 		const Aa = pigments[ ka ].A;
 		const Ab = kb >= 0 ? pigments[ kb ].A : [ 0, 0, 0 ];
-		achievable[ i * 3 ] = xa * Aa[ 0 ] + xb * Ab[ 0 ];
-		achievable[ i * 3 + 1 ] = xa * Aa[ 1 ] + xb * Ab[ 1 ];
-		achievable[ i * 3 + 2 ] = xa * Aa[ 2 ] + xb * Ab[ 2 ];
+		const Ac = kc >= 0 ? pigments[ kc ].A : [ 0, 0, 0 ];
+		achievable[ i * 3 ] = xa * Aa[ 0 ] + xb * Ab[ 0 ] + xc * Ac[ 0 ];
+		achievable[ i * 3 + 1 ] = xa * Aa[ 1 ] + xb * Ab[ 1 ] + xc * Ac[ 1 ];
+		achievable[ i * 3 + 2 ] = xa * Aa[ 2 ] + xb * Ab[ 2 ] + xc * Ac[ 2 ];
 		fitErr += bestErr;
 	}
 	if ( photo ) {

@@ -101,9 +101,11 @@ export class AnimationController {
 	}
 
 	/**
-	 * Time-lapse: play the whole painting in about `seconds` of real time
-	 * (0 turns it off). Everything runs faster together, the simulation and
-	 * every gesture, so the drops, splashes and strokes all still show.
+	 * Time-lapse (Quick draw): play the painting fast enough that its planned
+	 * duration takes about `seconds` of real time (0 turns it off). Nothing
+	 * is trimmed to fit: it runs at that speed until everything is painted.
+	 * The simulation and every gesture speed up together, so the drops,
+	 * splashes and strokes all still show.
 	 */
 	setTimelapse( seconds ) {
 		this.timelapse = seconds;
@@ -112,10 +114,7 @@ export class AnimationController {
 	/** Painting seconds per real second. */
 	get rate() {
 		if ( this.timelapse && this.duration ) {
-			// Aim at the end: catch up if layer planning or the hand held it back.
-			const left = this.timelapse - ( performance.now() - this.startedAt - ( this.pausedMs || 0 ) ) / 1000;
-			const base = this.duration / this.timelapse;
-			return Math.min( base * 3, Math.max( base, ( this.duration - this.simTime ) / Math.max( 1, left ) ) );
+			return this.duration / this.timelapse;
 		}
 		return this.speed;
 	}
@@ -342,7 +341,8 @@ export class AnimationController {
 		const idx = this.layerIdx;
 		const cur = this.model.snapshotPigment();
 		const epoch = this.epoch = ( this.epoch || 0 ) + 1;
-		this.planLayer( { layer: idx, cur: cur.buffer, handX: this.splash.handX, handY: this.splash.handY, seed: idx }, [ cur.buffer ] ).then( ( res ) => {
+		// Quick draw plans without time limits: it paints everything.
+		this.planLayer( { layer: idx, cur: cur.buffer, handX: this.splash.handX, handY: this.splash.handY, seed: idx, unlimited: !! this.timelapse }, [ cur.buffer ] ).then( ( res ) => {
 			if ( epoch !== this.epoch ) {
 				return; // restarted meanwhile
 			}
@@ -352,7 +352,7 @@ export class AnimationController {
 			// left, so later layers are never pushed past the end.
 			const span = res.ops.length ? res.ops[ res.ops.length - 1 ].t : 0;
 			const avail = Math.max( 0.04 * this.duration, L.t1 * this.duration - base );
-			const squeeze = span > avail ? avail / span : 1;
+			const squeeze = span > avail && ! this.timelapse ? avail / span : 1;
 			for ( const op of res.ops ) {
 				op.t = base + op.t * squeeze;
 				op.stage = idx;

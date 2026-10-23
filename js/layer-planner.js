@@ -24,15 +24,15 @@
  */
 
 import { Rng } from './prng.js';
-import { depthInside, packDiscs, sweepStrokes, spineStrokes } from './composition-planner.js';
-import { minFilter, maxFilter, boxBlur } from './image-analyzer.js';
+import { depthInside, packDiscs, sweepStrokes, spineStrokes, orientedSweepStrokes, strokeAngle } from './composition-planner.js';
+import { minFilter, maxFilter, boxBlur, gaussBlur } from './image-analyzer.js';
 
 export const LAYERS = [
 	{ id: 'wash', name: 'First wash: light and loose', t0: 0.0, t1: 0.24 },
 	{ id: 'mid', name: 'Mid-tones, shape by shape', t0: 0.27, t1: 0.55 },
 	{ id: 'glaze', name: 'Shadow glazes', t0: 0.58, t1: 0.75 },
-	{ id: 'detail', name: 'Darks & details', t0: 0.77, t1: 0.92 },
-	{ id: 'finish', name: 'Finish', t0: 0.93, t1: 0.97 },
+	{ id: 'detail', name: 'Darks & details', t0: 0.77, t1: 0.88 },
+	{ id: 'finish', name: 'Finish: filling what was missed', t0: 0.89, t1: 0.97 },
 ];
 
 /** Value ceilings (mean optical density) of the first two layers. */
@@ -47,12 +47,18 @@ export function layerContext( an, { duration, seed, fineDetail = { strokes: 1, f
 	const N = W * H;
 	const K = pigments.length;
 	const meanA = pigments.map( ( p ) => ( p.A[ 0 ] + p.A[ 1 ] + p.A[ 2 ] ) / 3 );
-	// Target darkness per cell (all pigments).
+	// What the big passes (first wash, mid-tones, glazes) paint. In a photo
+	// that is the picture without its fine detail: each colour's small holes
+	// closed (a building block without its windows, a field without its
+	// flowers) and its small specks removed; the details come at the end.
+	const rd = Math.max( 1, Math.round( B / 130 ) );
+	const big = an.photo ? T[ 0 ].map( ( m, k ) => ( pigments[ k ].isPaper ? m : maxFilter( minFilter( minFilter( maxFilter( m, W, H, rd ), W, H, rd ), W, H, rd ), W, H, rd ) ) ) : T[ 0 ];
+	// Target darkness per cell (all pigments) of the big passes.
 	const D = new Float32Array( N );
 	for ( let i = 0; i < N; i++ ) {
 		let d = 0;
 		for ( let k = 0; k < K; k++ ) {
-			d += T[ 0 ][ k ][ i ] * meanA[ k ];
+			d += big[ k ][ i ] * meanA[ k ];
 		}
 		D[ i ] = d;
 	}
@@ -70,17 +76,34 @@ export function layerContext( an, { duration, seed, fineDetail = { strokes: 1, f
 	// Shadow masses: the full target opened at a modest scale (no fine detail).
 	const rs = Math.max( 2, Math.round( B / 90 ) );
 	const shadow = T[ 0 ].map( ( m, k ) => ( pigments[ k ].isPaper ? m : maxFilter( minFilter( m, W, H, rs ), W, H, rs ) ) );
-	return { an, W, H, B, N, K, meanA, D, edgeNear, shadow, duration, seed, fineDetail };
+	// Lightness gradients (smoothed) for each shape's stroke direction.
+	const Ls = new Float32Array( N );
+	for ( let i = 0; i < N; i++ ) {
+		Ls[ i ] = an.lab[ i * 3 ];
+	}
+	const Lb = gaussBlur( Ls, W, H, Math.max( 1, B / 300 ) );
+	const gx = new Float32Array( N );
+	const gy = new Float32Array( N );
+	for ( let y = 1; y < H - 1; y++ ) {
+		for ( let x = 1; x < W - 1; x++ ) {
+			const i = y * W + x;
+			gx[ i ] = Lb[ i + 1 ] - Lb[ i - 1 ];
+			gy[ i ] = Lb[ i + W ] - Lb[ i - W ];
+		}
+	}
+	return { an, W, H, B, N, K, meanA, D, big, edgeNear, shadow, duration, seed, fineDetail, gx, gy };
 }
 
 /** The value target of a layer, per pigment (K arrays) and as density. */
 function layerTarget( ctx, layer ) {
-	const { an, N, K, meanA, D, shadow } = ctx;
+	const { an, N, K, meanA, D, shadow, big } = ctx;
 	const T0 = an.T[ 0 ];
 	const target = new Float32Array( K * N );
 	for ( let k = 0; k < K; k++ ) {
 		const off = k * N;
-		const t0 = T0[ k ];
+		// The big passes paint the picture without its fine detail; the
+		// details and the finish aim at the full picture.
+		const t0 = layer <= 2 ? big[ k ] : T0[ k ];
 		for ( let i = 0; i < N; i++ ) {
 			let v;
 			if ( 0 === layer ) {
@@ -120,6 +143,37 @@ function closeMask( mask, W, H, r, reserve ) {
 		out[ i ] = c[ i ] > 0.5 && ! reserve[ i ] ? 1 : 0;
 	}
 	return out;
+}
+
+/** How deep the deepest cell of a shape lies (distance to its border). */
+function deepestIn( cells, W ) {
+	let x0 = Infinity;
+	let y0 = Infinity;
+	let x1 = -Infinity;
+	let y1 = -Infinity;
+	for ( const i of cells ) {
+		const x = i % W;
+		const y = ( i / W ) | 0;
+		x0 = Math.min( x0, x );
+		y0 = Math.min( y0, y );
+		x1 = Math.max( x1, x );
+		y1 = Math.max( y1, y );
+	}
+	// Local grid with a one-cell margin, so the work is the shape's size.
+	const lw = x1 - x0 + 3;
+	const lh = y1 - y0 + 3;
+	const m = new Uint8Array( lw * lh );
+	for ( const i of cells ) {
+		m[ ( ( ( i / W ) | 0 ) - y0 + 1 ) * lw + ( i % W ) - x0 + 1 ] = 1;
+	}
+	const depth = depthInside( m, lw, lh );
+	let deepest = 0;
+	for ( let i = 0; i < depth.length; i++ ) {
+		if ( m[ i ] && depth[ i ] > deepest ) {
+			deepest = depth[ i ];
+		}
+	}
+	return deepest;
 }
 
 /** Connected components (4-neighbour) of a mask, as lists of cells. */
@@ -205,6 +259,8 @@ const liftSecs = ( B, r ) => {
 	const u = Math.min( 1, r / ( B * 0.02 ) );
 	return 0.25 + 0.45 * u + 2 * ( 0.1 + 0.12 * u );
 };
+// A dab with the brush tip.
+const DAB_SECS = 0.08;
 const brushSpeed = ( B, w ) => Math.max( B * 0.35, w * 14 );
 // Real hand time: the stroke itself plus lifting, moving and landing again.
 const strokeSecs = ( B, st, w ) => 0.6 + st.len / brushSpeed( B, w );
@@ -224,6 +280,9 @@ export function planLayer( ctx, layer, state ) {
 	const rng = new Rng( ( ctx.seed * 31 + layer * 7919 + ( state.seed || 0 ) ) >>> 0 );
 	const L = LAYERS[ layer ];
 	const window = ( L.t1 - L.t0 ) * ctx.duration;
+	// Hand time a layer may use. Quick draw has no limit: everything planned
+	// is painted, however long it takes.
+	const budget = state.unlimited ? Infinity : window * 0.72;
 	const { target, dens } = layerTarget( ctx, layer );
 	const cur = state.cur;
 	// What each pigment still needs here for this layer.
@@ -365,10 +424,10 @@ export function planLayer( ctx, layer, state ) {
 				total += secs + 3;
 				built.push( { ...p, w, strokes } );
 			}
-			if ( total <= window * 0.72 ) {
+			if ( total <= budget ) {
 				break;
 			}
-			scale *= Math.sqrt( total / ( window * 0.72 ) );
+			scale *= Math.sqrt( total / budget );
 		}
 		let t = 0.5;
 		for ( const p of built ) {
@@ -476,15 +535,11 @@ export function planLayer( ctx, layer, state ) {
 			let py = hy;
 			for ( const c of colours ) {
 				for ( const sh of walk( c.shapes, px, py ) ) {
-					const m = new Uint8Array( N );
-					for ( const i of sh.cells ) {
-						m[ i ] = 1;
+					// The shape's depth does not change between attempts.
+					if ( undefined === sh.deepest ) {
+						sh.deepest = deepestIn( sh.cells, W );
 					}
-					let deepest = 0;
-					const depth = depthInside( m, W, H, B );
-					for ( const i of sh.cells ) {
-						deepest = Math.max( deepest, depth[ i ] );
-					}
+					const deepest = sh.deepest;
 					const w = Math.min( B * ( glaze ? 0.035 : 0.05 ), Math.max( B * 0.008, deepest * 0.8 * scale ) );
 					// Mid-tones and glazes are washes; thin shapes are left for the
 					// darks-and-details layer, as a painter would.
@@ -494,7 +549,12 @@ export function planLayer( ctx, layer, state ) {
 					}
 					// Edges are cut in once, with the mid-tones; glazes do not retrace
 					// them (that would draw an outline).
-					let strokes = sweepStrokes( sh.cells, W, w, seam, { H, edgeNear: ctx.edgeNear, rng } );
+					// In a photo, strokes follow the form (texture direction or long
+					// axis); illustrations keep level rows (measured: better there).
+					if ( undefined === sh.angle ) {
+						sh.angle = an.photo ? strokeAngle( sh.cells, W, ctx.gx, ctx.gy ) : 0;
+					}
+					let strokes = orientedSweepStrokes( sh.cells, W, w, seam, { H, edgeNear: ctx.edgeNear, rng }, sh.angle );
 					if ( glaze ) {
 						strokes = strokes.filter( ( st ) => ! st.edge );
 					}
@@ -512,10 +572,10 @@ export function planLayer( ctx, layer, state ) {
 					py = sh.y;
 				}
 			}
-			if ( total <= window * 0.72 ) {
+			if ( total <= budget ) {
 				break;
 			}
-			scale *= Math.sqrt( total / ( window * 0.72 ) );
+			scale *= Math.sqrt( total / budget );
 		}
 		// Still too much for the time: keep the shapes that matter most (most
 		// paint needed where it is most visible), in their painting order.
@@ -524,11 +584,11 @@ export function planLayer( ctx, layer, state ) {
 			for ( const b of built ) {
 				total += b.secs;
 			}
-			if ( total > window * 0.72 ) {
+			if ( total > budget ) {
 				const keep = new Set();
 				let used = 0;
 				for ( const b of [ ...built ].sort( ( x, y ) => y.mass - x.mass ) ) {
-					if ( used + b.secs <= window * 0.72 ) {
+					if ( used + b.secs <= budget ) {
 						used += b.secs;
 						keep.add( b );
 					}
@@ -585,7 +645,7 @@ export function planLayer( ctx, layer, state ) {
 		}
 		lights.sort( ( a, b ) => b.mass - a.mass );
 		const lifted = new Uint8Array( N );
-		const liftBudget = window * 0.72 * 0.3 * ( ctx.fineDetail.strokes || 1 );
+		const liftBudget = budget * 0.3 * ( ctx.fineDetail.strokes || 1 );
 		const pick = [];
 		let liftEnd = 0;
 		for ( const l of lights ) {
@@ -646,11 +706,15 @@ export function planLayer( ctx, layer, state ) {
 			// only skip specks that are neither important nor dark.
 			const avgImp = imp / cells.length;
 			const avgNeed = sums[ k1 ] / cells.length;
-			if ( ! strokes.length || ( len < B * 0.02 && ( cells.length < 5 || ( avgImp < 0.45 && avgNeed < 0.4 ) ) ) ) {
+			// In a photo, dot-sized details (a flower, a lit window) are dabbed
+			// in with the brush tip: a touch each, so hundreds of them fit.
+			if ( an.photo && len < B * 0.015 && rr < B * 0.01 ) {
+				if ( cells.length >= 2 && avgNeed >= 0.05 ) {
+					shapes.push( { k: k1, dab: true, r: Math.sqrt( cells.length / Math.PI ) + 0.6, strokes: [], secs: DAB_SECS, mass: avgNeed * ( 0.3 + avgImp ), ...centroid( cells, W ) } );
+				}
 				return;
 			}
-			// In a photo a lone speck reads as a stray dot, not as detail.
-			if ( an.photo && len < B * 0.012 && avgImp < 0.6 ) {
+			if ( ! strokes.length || ( len < B * 0.02 && ( cells.length < 5 || ( avgImp < 0.45 && avgNeed < 0.4 ) ) ) ) {
 				return;
 			}
 			// Only details here: thin or small shapes. Big leftovers belong to
@@ -736,9 +800,9 @@ export function planLayer( ctx, layer, state ) {
 		shapes.sort( ( a, b ) => b.mass - a.mass );
 		const chosen = [];
 		let used = 0;
-		const budget = window * 0.72 * ( ctx.fineDetail.strokes || 1 ) - liftEnd;
+		const detailBudget = budget * ( ctx.fineDetail.strokes || 1 ) - liftEnd;
 		for ( const s of shapes ) {
-			if ( used + s.secs <= budget ) {
+			if ( used + s.secs <= detailBudget ) {
 				used += s.secs;
 				chosen.push( s );
 			}
@@ -748,6 +812,10 @@ export function planLayer( ctx, layer, state ) {
 		let t = 0.3 + liftEnd;
 		for ( const k of order ) {
 			for ( const s of walk( chosen.filter( ( c ) => c.k === k ), hx, hy ) ) {
+				if ( s.dab ) {
+					ops.push( dab( k, s, t, pigments, rng ) );
+					t += DAB_SECS;
+				}
 				for ( const st of s.strokes ) {
 					ops.push( spine( k, st, t, 0.95, 0.12, rng ) );
 					t += strokeSecs( B, st, st.r );
@@ -757,7 +825,118 @@ export function planLayer( ctx, layer, state ) {
 			}
 		}
 	} else {
-		/* Finish: lift where it went too dark, a couple of accents --------- */
+		/* Finish: step back, fill what is still bare, lift what is too dark */
+		// Bare paper where the picture needs paint: each patch is painted in
+		// the colour it needs, washes for patches, touches for specks; the
+		// biggest and most visible first, within the time.
+		const have = ( i ) => dens[ i ] - room( i );
+		const bare = new Uint8Array( N );
+		for ( let i = 0; i < N; i++ ) {
+			const t = dens[ i ] - 0.02;
+			bare[ i ] = ! reserve[ i ] && t > 0.12 && have( i ) < 0.5 * t ? 1 : 0;
+		}
+		const holes = [];
+		const specks = [];
+		// Which hole each cell belongs to (for the colour of drops filling it).
+		const holeOf = new Int32Array( N ).fill( -1 );
+		for ( const cells of components( closeMask( bare, W, H, 1, reserve ), W, H, 1 ) ) {
+			const sums = new Float64Array( K );
+			let imp = 0;
+			let dsum = 0;
+			for ( const i of cells ) {
+				imp += importance[ i ];
+				dsum += dens[ i ];
+				for ( let k = 0; k < K; k++ ) {
+					sums[ k ] += pigments[ k ].isPaper ? 0 : need( k, i );
+				}
+			}
+			let k1 = 0;
+			for ( let k = 1; k < K; k++ ) {
+				if ( sums[ k ] > sums[ k1 ] ) {
+					k1 = k;
+				}
+			}
+			if ( sums[ k1 ] <= 0 ) {
+				continue;
+			}
+			// A speck: a dot of its colour from the brush tip.
+			if ( cells.length <= Math.max( 8, ( B * 0.01 ) ** 2 ) ) {
+				specks.push( { k: k1, ...centroid( cells, W ), r: Math.sqrt( cells.length / Math.PI ) + 0.9 } );
+				continue;
+			}
+			const deepest = deepestIn( cells, W );
+			let strokes;
+			let w = 0;
+			if ( deepest >= 2 ) {
+				w = Math.min( B * 0.04, Math.max( 1.5, deepest * 0.9 ) );
+				const angle = an.photo ? strokeAngle( cells, W, ctx.gx, ctx.gy ) : 0;
+				strokes = orientedSweepStrokes( cells, W, w, seam, { H, edgeNear: ctx.edgeNear, rng }, angle );
+			} else {
+				strokes = spineStrokes( cells, W );
+			}
+			if ( ! strokes.length ) {
+				continue;
+			}
+			let secs = 0;
+			for ( const st of strokes ) {
+				secs += strokeSecs( B, st, w || st.r );
+			}
+			for ( const i of cells ) {
+				holeOf[ i ] = holes.length;
+			}
+			holes.push( { k: k1, cells, strokes, w, secs, mass: ( dsum / cells.length ) * cells.length * ( 0.4 + imp / cells.length ), ...centroid( cells, W ) } );
+		}
+		holes.sort( ( a, b ) => b.mass - a.mass );
+		const fill = [];
+		let used = 0;
+		const left = new Uint8Array( N );
+		let anyLeft = false;
+		for ( const h of holes ) {
+			if ( used + h.secs <= ( state.unlimited ? Infinity : window * 0.8 ) ) {
+				used += h.secs;
+				fill.push( h );
+			} else {
+				for ( const i of h.cells ) {
+					left[ i ] = 1;
+				}
+				anyLeft = true;
+			}
+		}
+		// Gaps the brush has no time for are filled with drops of their colour
+		// (drops do not need the hand): nothing bare is left out.
+		if ( anyLeft ) {
+			const discs = packDiscs( left, depthInside( left, W, H, B ), new Uint8Array( N ), { W, H, maxR: B * 0.03, minR: 0.8, jitter: 0.15, seam: 1, rng, limit: 1500 } );
+			discs.forEach( ( d, j ) => {
+				const h = holes[ holeOf[ Math.round( d.y ) * W + Math.round( d.x ) ] ];
+				if ( h ) {
+					specks.push( { k: h.k, x: d.x, y: d.y, r: d.fit } );
+				}
+			} );
+		}
+		let t = 0.3;
+		let fid = 0;
+		const order = [ ...new Set( fill.map( ( h ) => h.k ) ) ].sort( ( a, b ) => pigments[ b ].L - pigments[ a ].L );
+		for ( const k of order ) {
+			for ( const h of walk( fill.filter( ( f ) => f.k === k ), hx, hy ) ) {
+				const wash = layer * 1e5 + fid++;
+				for ( const st of h.strokes ) {
+					if ( h.w ) {
+						ops.push( sweep( k, st, h.w, t, wash, 1, 0.35 + 0.3 * pigments[ k ].L, B, rng ) );
+						t += strokeSecs( B, st, h.w );
+					} else {
+						ops.push( spine( k, st, t, 0.95, 0.15, rng ) );
+						t += strokeSecs( B, st, st.r );
+					}
+				}
+				hx = h.x;
+				hy = h.y;
+			}
+		}
+		// Specks are dotted in as the painter goes (drops do not need the hand).
+		const tEnd = Math.max( t, window * 0.5 );
+		walk( specks, hx, hy ).forEach( ( sp, j, list ) => {
+			ops.push( dab( sp.k, sp, 0.3 + ( ( tEnd - 0.3 ) * j ) / Math.max( 1, list.length ), pigments, rng ) );
+		} );
 		const over = new Uint8Array( N );
 		for ( let i = 0; i < N; i++ ) {
 			if ( room( i ) < -0.5 && an.room[ i ] > 3 ) {
@@ -765,7 +944,6 @@ export function planLayer( ctx, layer, state ) {
 			}
 		}
 		const blots = components( over, W, H, 6 ).sort( ( a, b ) => b.length - a.length ).slice( 0, 6 );
-		let t = 0.3;
 		for ( const cells of blots ) {
 			const c = centroid( cells, W );
 			ops.push( { type: 'lift', x: c.x, y: c.y, r: Math.min( B * 0.03, Math.sqrt( cells.length / Math.PI ) ), strength: 0.5, seed: rng.u32(), chaos: 0.2, t } );
@@ -793,6 +971,11 @@ function drop( k, d, t, pigments, rng, amount ) {
 		seed: rng.u32(),
 		t: Math.max( 0, t ),
 	};
+}
+
+/** A touch of the brush tip: a small round mark of its colour, no spatter. */
+function dab( k, s, t, pigments, rng ) {
+	return { ...drop( k, { x: s.x, y: s.y, fit: s.r }, t, pigments, rng, 0.95 ), trust: true, dab: true, chaos: 0.05 };
 }
 
 function sweep( k, st, w, t, wash, amount, water, B, rng ) {

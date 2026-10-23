@@ -16,21 +16,30 @@ python3 -m http.server 8765
 
 **Controls:** pick a sample or drop an image; settings (colours, detail,
 duration) apply as soon as they change. **Paint** plays the painting in
-real time over the chosen duration; **Quick draw** plays the same painting,
-every drop, splash and stroke, time-lapsed into 20 seconds. Speed, seed and
+real time over the chosen duration; **Quick draw** time-lapses the painting
+(its planned duration plays in about 20 seconds) with no time limits: no
+shape, detail or gap is trimmed to fit, so it runs until everything is
+painted, every drop, splash and stroke. Speed, seed and
 the reference view are under *More options*.
 
 **Photos:** *Image type* is detected automatically (shown as "Auto
 (photo)" or "Auto (illustration)") and can be forced. A photograph is
 painted the way a painter simplifies one: the image is first reduced to
 flat shapes (repeated edge-preserving smoothing in OKLab, and pigment maps
-smoothed within those shapes); the first wash goes down in broad colour
-zones (sky, glow, ground) instead of hundreds of small regions; mid-tones
-and glazes paint whole areas with their small holes closed (a field before
-its flowers, a building block before its windows), and the glazes take a
-photo's big dark masses to full depth; then the details layer
-lifts small spots that must be lighter (lit windows) with a damp brush and
-touches in their colour. Detection uses the share of pixels with fine,
+smoothed within those shapes). The big passes (first wash, mid-tones,
+glazes) paint the picture *without* its fine detail: each colour's small
+holes are closed and its small specks removed, so a building block goes
+down whole without its windows and a field without its flowers. The first
+wash is laid in broad colour zones (sky, glow, ground), the glazes take the
+big dark masses to full depth, and strokes follow the form. Only then does
+the details layer add the fine work: it lifts the paint off spots that must
+be lighter (lit windows) with a damp brush, and dabs in windows, flowers
+and other dot-sized details with the brush tip. A last pass fills anything
+still bare.
+
+Pigments for a photo are chosen for how well they mix into its colours
+(judged by how different the mixes look in OKLab), not as its most common
+colours, and each area may mix up to three of them. Detection uses the share of pixels with fine,
 non-edge texture (photos ≈0.25–0.3, flat artwork < 0.08). A higher Detail
 setting keeps finer shapes: the photo filters span a fixed share of the
 picture, sampled sparsely so analysis stays fast (≈0.7 s at Balanced,

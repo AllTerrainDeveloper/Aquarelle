@@ -85,7 +85,7 @@ self.onmessage = ( e ) => {
 				break;
 			}
 			case 'planLayer': {
-				const res = planLayer( layerCtx, msg.layer, { cur: new Float32Array( msg.cur ), handX: msg.handX, handY: msg.handY, seed: msg.seed } );
+				const res = planLayer( layerCtx, msg.layer, { cur: new Float32Array( msg.cur ), handX: msg.handX, handY: msg.handY, seed: msg.seed, unlimited: msg.unlimited } );
 				reply( res, [ res.target.buffer, res.dens.buffer ] );
 				break;
 			}

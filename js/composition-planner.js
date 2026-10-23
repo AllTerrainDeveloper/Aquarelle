@@ -1752,3 +1752,115 @@ export function planGapStrokes( model, an, { budget, seed, handX, handY } ) {
 	}
 	return out;
 }
+
+/**
+ * sweepStrokes with the rows running at an angle (radians; 0 = horizontal):
+ * the shape is turned so its painting direction is horizontal, swept, and
+ * the strokes are turned back. A painter follows the form: down a cypress,
+ * along a frame, across a field.
+ */
+export function orientedSweepStrokes( cells, W, w, seam, o, angle, maxSamples ) {
+	if ( Math.abs( Math.sin( angle ) ) < 0.08 ) {
+		return sweepStrokes( cells, W, w, seam, o, maxSamples );
+	}
+	const { H, edgeNear } = o;
+	const c = Math.cos( angle );
+	const s = Math.sin( angle );
+	const inShape = new Set( cells );
+	let u0 = Infinity;
+	let v0 = Infinity;
+	let u1 = -Infinity;
+	let v1 = -Infinity;
+	for ( const i of cells ) {
+		const x = i % W;
+		const y = ( i / W ) | 0;
+		const u = x * c + y * s;
+		const v = -x * s + y * c;
+		u0 = Math.min( u0, u );
+		v0 = Math.min( v0, v );
+		u1 = Math.max( u1, u );
+		v1 = Math.max( v1, v );
+	}
+	// Padding keeps the turned shape off the virtual sheet's edges.
+	const pad = 3;
+	const VW = Math.ceil( u1 - u0 ) + 2 * pad + 1;
+	const VH = Math.ceil( v1 - v0 ) + 2 * pad + 1;
+	const vEdge = new Uint8Array( VW * VH );
+	const vcells = [];
+	const toX = ( vu, vv ) => ( vu + u0 - pad ) * c - ( vv + v0 - pad ) * s;
+	const toY = ( vu, vv ) => ( vu + u0 - pad ) * s + ( vv + v0 - pad ) * c;
+	for ( let vv = 0; vv < VH; vv++ ) {
+		for ( let vu = 0; vu < VW; vu++ ) {
+			const x = Math.round( toX( vu, vv ) );
+			const y = Math.round( toY( vu, vv ) );
+			if ( x < 0 || y < 0 || x >= W || y >= H ) {
+				continue;
+			}
+			const i = y * W + x;
+			vEdge[ vv * VW + vu ] = edgeNear[ i ];
+			if ( inShape.has( i ) ) {
+				vcells.push( vv * VW + vu );
+			}
+		}
+	}
+	const strokes = sweepStrokes( vcells, VW, w, seam, { ...o, H: VH, edgeNear: vEdge }, maxSamples );
+	for ( const st of strokes ) {
+		const p = st.pts;
+		for ( let q = 0; q < p.length; q += 3 ) {
+			const x = toX( p[ q ], p[ q + 1 ] );
+			const y = toY( p[ q ], p[ q + 1 ] );
+			p[ q ] = Math.min( W - 1, Math.max( 0, x ) );
+			p[ q + 1 ] = Math.min( H - 1, Math.max( 0, y ) );
+		}
+		st.x = p[ 0 ];
+		st.y = p[ 1 ];
+	}
+	return strokes;
+}
+
+/**
+ * The direction a painter would stroke a shape (radians, 0 = horizontal):
+ * along the image's own texture where it has a clear direction (structure
+ * tensor of lightness), else along the shape's long axis, else across.
+ */
+export function strokeAngle( cells, W, gx, gy ) {
+	let jxx = 0;
+	let jxy = 0;
+	let jyy = 0;
+	let mx = 0;
+	let my = 0;
+	for ( const i of cells ) {
+		jxx += gx[ i ] * gx[ i ];
+		jxy += gx[ i ] * gy[ i ];
+		jyy += gy[ i ] * gy[ i ];
+		mx += i % W;
+		my += ( i / W ) | 0;
+	}
+	const tr = jxx + jyy;
+	if ( tr > 1e-9 ) {
+		const coh = Math.sqrt( ( jxx - jyy ) ** 2 + 4 * jxy * jxy ) / tr;
+		if ( coh > 0.25 ) {
+			// Strokes run along the edges and grain: across the gradient.
+			return 0.5 * Math.atan2( 2 * jxy, jxx - jyy ) + Math.PI / 2;
+		}
+	}
+	mx /= cells.length;
+	my /= cells.length;
+	let cxx = 0;
+	let cxy = 0;
+	let cyy = 0;
+	for ( const i of cells ) {
+		const dx = ( i % W ) - mx;
+		const dy = ( ( i / W ) | 0 ) - my;
+		cxx += dx * dx;
+		cxy += dx * dy;
+		cyy += dy * dy;
+	}
+	const d = Math.sqrt( ( cxx - cyy ) ** 2 + 4 * cxy * cxy );
+	const l1 = ( cxx + cyy + d ) / 2;
+	const l2 = ( cxx + cyy - d ) / 2;
+	if ( l1 > 2.5 * Math.max( 1e-6, l2 ) ) {
+		return 0.5 * Math.atan2( 2 * cxy, cxx - cyy );
+	}
+	return 0;
+}
