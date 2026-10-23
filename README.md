@@ -66,6 +66,13 @@ animated hand; `?bench=1&benchSpeed=16&benchRt=20` runs the benchmark
    areas. The pigment-mass rule above caps every stamp at the remaining
    need, so pigment overshoot only comes from flow; dark mistakes are
    corrected by lifting.
+3. **Two acts.** Act 1 (about the first 30%) is drops and splashes: every
+   object's colour is poured in as big drops sized to fit, with its other
+   colours charged in wet-in-wet. Act 2 is the brush, which cuts in, washes
+   and perfects whatever the drops left. A brush never pushes any cell past
+   the image's darkness there, counting all paint already present; water
+   spreading into dry paper carries little pigment (the front is mostly
+   clear), so dark washes do not bleed.
 3a. **Object by object, like a painter.** The big segmented areas (sky,
    hair, face, coat) are the objects. They are painted biggest first (the
    large masses), then light to dark, each in one go: a few big drops of
@@ -89,10 +96,13 @@ animated hand; `?bench=1&benchSpeed=16&benchRt=20` runs the benchmark
      washes near borders, in three glazes (coarse → fine).
    - **The tip stays in its colour:** brush paths only touch paper where
      their colour belongs; a touch too short to be a stroke is skipped.
-   - **Centreline strokes:** fine work (letters, eyelids, contours, gaps)
-     follows each shape's spine: discs that fit the local width are chained
-     into brush paths along its curves, the tip widening and narrowing with
-     the shape, lifting between separate parts.
+   - **Spine strokes:** fine work (letters, brows, eyelids, gaps) is painted
+     tip to tip in one stroke: the two points furthest apart *through* the
+     shape are found and the shortest path between them, which stays inside
+     it, becomes the stroke; its tip follows the local width; branches get
+     their own strokes. Shapes are found across colours (a brow mixing two
+     darks is one shape): the main pigment paints it and the other glazes
+     along the same spine. A shape is painted whole or not at all.
    - **Step-back passes** (55%, 80%, 93%): the painter compares the canvas
      with the target. Where a colour is still bare *or clearly too light*,
      larger areas get a glaze sized to fit and the rest is painted along its

@@ -436,12 +436,14 @@ export class SplashGenerator {
 			// Droplets stay inside the colour area they were thrown in; only
 			// background spatter may wander, and never onto a border.
 			const near = this.edgeNear( sx, sy, 2 );
+			// Droplets only land where their colour belongs (no dark spatter
+			// thrown onto a light neighbour), and never on a border.
 			const sameArea = an.labels[ si ] === an.labels[ this._idx( x, y ) ];
-			if ( near > 0.3 || ( ! sameArea && ( imp > 0.35 || near > 0.15 ) ) ) {
+			if ( near > 0.3 || ! this.belongs( k, sx, sy ) || ( ! sameArea && near > 0.15 ) ) {
 				continue;
 			}
-			// Decorative allowance only where it cannot hurt the subject.
-			const spill = 0.14 * ( op.chaos ?? 1 ) * ( 1 - imp ) * ( 1 - imp );
+			// A faint decorative tint only in quiet background areas of this colour.
+			const spill = 0.06 * ( op.chaos ?? 1 ) * ( 1 - imp ) * ( 1 - imp );
 			const sr = Math.max( 0.8, r * ( far ? rng.range( 0.05, 0.14 ) : rng.range( 0.08, 0.22 ) ) );
 			const flight = ( 0.12 + ( 0.22 * dist ) / ( r * 4.5 ) ) * rng.range( 0.8, 1.2 );
 			const sblob = this._stamp( rng, op, sx, sy, sr, k, {
@@ -493,7 +495,8 @@ export class SplashGenerator {
 
 		let k = op.k;
 		const level = op.level ?? 1;
-		if ( k >= 0 && ( model.need( k, level, this._idx( x, y ) ) < 0.01 || ! this.belongs( k, x, y ) ) ) {
+		// Planned (trusted) strokes keep their colour; others are re-checked.
+		if ( k >= 0 && ! op.trust && ( model.need( k, level, this._idx( x, y ) ) < 0.01 || ! this.belongs( k, x, y ) ) ) {
 			// The planned pigment is already satisfied here; pick the one that is not.
 			k = this.autoPigment( x, y, level );
 		} else if ( k < 0 && 'bloom' !== op.type && 'wetblend' !== op.type ) {

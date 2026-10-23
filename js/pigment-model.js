@@ -27,6 +27,8 @@ const EPS = 1e-4;
 const WET = 0.012;
 const DRY = 0.004;
 const TS = 16;
+// Share of pigment carried by water that is wetting dry paper.
+const FRONT = 0.2;
 
 export class PigmentModel {
 	constructor( { W, H, pigments, T, paper, reserve } ) {
@@ -51,6 +53,18 @@ export class PigmentModel {
 			this.cap[ i ] = reserve && reserve[ i ] ? 1e9 : 0.3 + 0.4 * paper[ i ];
 		}
 		this.reserve = reserve || new Uint8Array( N );
+		this.meanA = new Float32Array( this.K );
+		pigments.forEach( ( p, k ) => ( this.meanA[ k ] = ( p.A[ 0 ] + p.A[ 1 ] + p.A[ 2 ] ) / 3 ) );
+		// Target optical density per cell (all pigments): brush strokes never
+		// push a cell past it.
+		this.targetDens = new Float32Array( N );
+		for ( let i = 0; i < N; i++ ) {
+			let dsum = 0;
+			for ( let k = 0; k < this.K; k++ ) {
+				dsum += T[ 0 ][ k ][ i ] * this.meanA[ k ];
+			}
+			this.targetDens[ i ] = dsum * 1.05 + 0.02;
+		}
 		this.h = new Float32Array( N );
 		this.g = [];
 		this.d = [];
@@ -528,7 +542,17 @@ export class PigmentModel {
 						streak *= 0.25;
 					}
 					if ( gk ) {
-						const add = tone * load * streak * ( 0.92 + 0.16 * n ) * ( cover - had );
+						let add = tone * load * streak * ( 0.92 + 0.16 * n ) * ( cover - had );
+						// Never past the image's darkness at this cell, counting all the
+						// paint already here (drops, other colours, this stroke).
+						let have = 0;
+						for ( let q = 0; q < this.K; q++ ) {
+							have += ( this.d[ q ][ i ] + this.g[ q ][ i ] ) * this.meanA[ q ];
+						}
+						const room = ( this.targetDens[ i ] - have ) / Math.max( 0.05, this.meanA[ k ] );
+						if ( add > room ) {
+							add = room > 0 ? room : 0;
+						}
 						gk[ i ] += add;
 						total += add;
 					}
@@ -771,6 +795,11 @@ export class PigmentModel {
 								const cj = hj > EPS ? gj / hj : 0;
 								const f = fx[ i ];
 								let tr = f > 0 ? f * ci : f * cj;
+								// Paper fibres filter pigment out of water advancing into dry
+								// paper: the front is mostly clear water, so washes do not bleed.
+								if ( ( f > 0 && hj <= WET ) || ( f < 0 && hi <= WET ) ) {
+									tr *= FRONT;
+								}
 								if ( hi > WET && hj > WET ) {
 									tr += kd * ( ci - cj ) * ( hi < hj ? hi : hj );
 								}
@@ -788,6 +817,11 @@ export class PigmentModel {
 								const cj = hj > EPS ? gj / hj : 0;
 								const f = fy[ i ];
 								let tr = f > 0 ? f * ci : f * cj;
+								// Paper fibres filter pigment out of water advancing into dry
+								// paper: the front is mostly clear water, so washes do not bleed.
+								if ( ( f > 0 && hj <= WET ) || ( f < 0 && hi <= WET ) ) {
+									tr *= FRONT;
+								}
 								if ( hi > WET && hj > WET ) {
 									tr += kd * ( ci - cj ) * ( hi < hj ? hi : hj );
 								}

@@ -15,12 +15,12 @@
 import { Rng } from './prng.js';
 
 export const STAGES = [
-	{ id: 'masses', name: 'Large color masses', t0: 0.0, t1: 0.17, chaos: 1.0 },
-	{ id: 'structure', name: 'Silhouettes & structure', t0: 0.13, t1: 0.38, chaos: 0.5 },
-	{ id: 'secondary', name: 'Secondary regions', t0: 0.33, t1: 0.55, chaos: 0.7 },
-	{ id: 'transitions', name: 'Transitions & blending', t0: 0.5, t1: 0.64, chaos: 1.1 },
-	{ id: 'details', name: 'Shadows, contrast & detail', t0: 0.6, t1: 0.88, chaos: 0.3 },
-	{ id: 'accents', name: 'Splashes & accents', t0: 0.86, t1: 0.95, chaos: 1.4 },
+	{ id: 'drops', name: 'Drops & splashes', t0: 0.0, t1: 0.3, chaos: 1.0 },
+	{ id: 'washes', name: 'Brush: cutting in & washes', t0: 0.3, t1: 0.45, chaos: 0.5 },
+	{ id: 'washes2', name: 'Brush: washes', t0: 0.45, t1: 0.62, chaos: 0.7 },
+	{ id: 'glazes', name: 'Glazes', t0: 0.6, t1: 0.64, chaos: 1.1 },
+	{ id: 'details', name: 'Details', t0: 0.62, t1: 0.88, chaos: 0.3 },
+	{ id: 'accents', name: 'Accents', t0: 0.86, t1: 0.95, chaos: 1.4 },
 	{ id: 'finish', name: 'Final glazes & drying', t0: 0.95, t1: 1.0, chaos: 0.3 },
 ];
 
@@ -378,6 +378,137 @@ export function expandCells( cells, W, H, margin, accept ) {
 		}
 	}
 	return out;
+}
+
+/**
+ * Strokes that follow a shape's spine the way a hand would: from one tip to
+ * the other in one go. The two points furthest apart *through* the shape
+ * are found (two breadth-first passes inside it), and the shortest path
+ * between them, which never leaves the shape, becomes the stroke. Its tip
+ * follows the local half-width. Parts it does not cover (branches, like the
+ * bar of an "e") get their own strokes the same way.
+ *
+ * @return {Object[]} strokes { pts: [x, y, r]..., len, r, x, y }
+ */
+export function spineStrokes( cells, W, { minR = 0.7, maxStrokes = 8 } = {} ) {
+	let x0 = Infinity;
+	let y0 = Infinity;
+	let x1 = -Infinity;
+	let y1 = -Infinity;
+	for ( const i of cells ) {
+		const x = i % W;
+		const y = ( i / W ) | 0;
+		x0 = Math.min( x0, x );
+		y0 = Math.min( y0, y );
+		x1 = Math.max( x1, x );
+		y1 = Math.max( y1, y );
+	}
+	const lw = x1 - x0 + 3;
+	const lh = y1 - y0 + 3;
+	const local = new Uint8Array( lw * lh );
+	for ( const i of cells ) {
+		local[ ( ( ( i / W ) | 0 ) - y0 + 1 ) * lw + ( ( i % W ) - x0 + 1 ) ] = 1;
+	}
+	const depth = depthInside( local, lw, lh );
+	const covered = new Uint8Array( lw * lh );
+	const dist = new Int32Array( lw * lh );
+	const parent = new Int32Array( lw * lh );
+	const queue = new Int32Array( lw * lh );
+	const NB = [ -1, 1, -lw, lw, -lw - 1, -lw + 1, lw - 1, lw + 1 ];
+	// Breadth-first search inside the shape (and not yet covered) from `src`.
+	const bfs = ( src ) => {
+		dist.fill( -1 );
+		let head = 0;
+		let tail = 0;
+		queue[ tail++ ] = src;
+		dist[ src ] = 0;
+		parent[ src ] = -1;
+		let far = src;
+		while ( head < tail ) {
+			const c = queue[ head++ ];
+			if ( dist[ c ] > dist[ far ] ) {
+				far = c;
+			}
+			for ( const o of NB ) {
+				const n = c + o;
+				if ( local[ n ] && ! covered[ n ] && dist[ n ] < 0 ) {
+					dist[ n ] = dist[ c ] + 1;
+					parent[ n ] = c;
+					queue[ tail++ ] = n;
+				}
+			}
+		}
+		return far;
+	};
+	const strokes = [];
+	for ( let s = 0; s < maxStrokes; s++ ) {
+		// Start from the deepest uncovered cell of what remains.
+		let seed = -1;
+		let best = 0;
+		let left = 0;
+		for ( let c = 0; c < local.length; c++ ) {
+			if ( local[ c ] && ! covered[ c ] ) {
+				left++;
+				if ( depth[ c ] > best ) {
+					best = depth[ c ];
+					seed = c;
+				}
+			}
+		}
+		if ( seed < 0 || left < 4 ) {
+			break;
+		}
+		const a = bfs( seed );
+		const b = bfs( a );
+		// The tip-to-tip path, inside the shape.
+		const path = [];
+		for ( let c = b; c >= 0; c = parent[ c ] ) {
+			path.push( c );
+		}
+		if ( path.length < 2 && s > 0 ) {
+			break;
+		}
+		// Light smoothing (a 5-cell moving average) keeps it inside thin shapes.
+		const pts = [];
+		for ( let q = 0; q < path.length; q++ ) {
+			let sx = 0;
+			let sy = 0;
+			let sr = 0;
+			let n = 0;
+			for ( let d = -2; d <= 2; d++ ) {
+				const c = path[ Math.min( path.length - 1, Math.max( 0, q + d ) ) ];
+				sx += c % lw;
+				sy += ( c / lw ) | 0;
+				sr += depth[ c ];
+				n++;
+			}
+			pts.push( sx / n + x0 - 1, sy / n + y0 - 1, Math.max( minR, ( sr / n ) * 0.95 ) );
+		}
+		// Mark what this stroke covers.
+		for ( const c of path ) {
+			const cx = c % lw;
+			const cy = ( c / lw ) | 0;
+			const rc = Math.max( 1, depth[ c ] ) + 0.5;
+			for ( let yy = Math.max( 0, Math.floor( cy - rc ) ); yy <= Math.min( lh - 1, Math.ceil( cy + rc ) ); yy++ ) {
+				for ( let xx = Math.max( 0, Math.floor( cx - rc ) ); xx <= Math.min( lw - 1, Math.ceil( cx + rc ) ); xx++ ) {
+					if ( ( xx - cx ) ** 2 + ( yy - cy ) ** 2 <= rc * rc ) {
+						covered[ yy * lw + xx ] = 1;
+					}
+				}
+			}
+		}
+		const sm = pts.length >= 9 ? smoothPath( pts, Math.max( 0.6, ( pts.reduce( ( a2, v, q ) => ( 2 === q % 3 ? a2 + v : a2 ), 0 ) / ( pts.length / 3 ) ) * 0.45 ), 1 ) : pts;
+		let len = 0;
+		let rs = 0;
+		for ( let q = 0; q < sm.length; q += 3 ) {
+			rs += sm[ q + 2 ];
+			if ( q ) {
+				len += Math.hypot( sm[ q ] - sm[ q - 3 ], sm[ q + 1 ] - sm[ q - 2 ] );
+			}
+		}
+		strokes.push( { pts: Float32Array.from( sm ), len, r: rs / ( sm.length / 3 ), x: sm[ 0 ], y: sm[ 1 ] } );
+	}
+	return strokes;
 }
 
 /**
@@ -787,7 +918,7 @@ export function planComposition( an, { duration, seed, density = 1, fineDetail =
 	const whiteish = ( i ) => bestT[ i ] < 0.05 || reserve[ i ];
 	// Build the sweeps; pick brush sizes so the whole sequence fits the time
 	// one hand has (about the first 55% of the painting).
-	const window = 0.53 * duration;
+	const window = 0.32 * duration;
 	const speedOf = ( w ) => Math.max( B * 0.35, w * 14 );
 	let brushScale = 1;
 	let plan = null;
@@ -797,7 +928,7 @@ export function planComposition( an, { duration, seed, density = 1, fineDetail =
 		for ( const o of sequence ) {
 			const ob = objects[ o ];
 			const main = ob.main;
-			const own = ob.cells.filter( ( i ) => T[ 0 ][ main ][ i ] >= 0.35 * bestT[ i ] );
+			const own = ob.cells.filter( ( i ) => T[ 0 ][ main ][ i ] >= 0.35 * bestT[ i ] && T[ 0 ][ main ][ i ] > 0.08 );
 			if ( own.length < 6 ) {
 				continue;
 			}
@@ -838,11 +969,17 @@ export function planComposition( an, { duration, seed, density = 1, fineDetail =
 		}
 		brushScale *= Math.sqrt( total / ( window * 0.92 ) );
 	}
-	let tc = duration * 0.01;
+	// Two acts, like a painter blocking in loosely and then refining:
+	// act 1 (about the first 30%) is drops — every object's pours with its
+	// colours charged in wet-in-wet; act 2 is the brush, which then cuts in,
+	// washes and perfects whatever the drops left (it measures need against
+	// the dried paint).
+	let td = duration * 0.01;
+	let tc = duration * 0.3;
 	for ( const item of plan ) {
 		const ob = objects[ item.o ];
 		const main = ob.main;
-		const stage = tc < duration * 0.17 ? 0 : tc < duration * 0.36 ? 1 : 2;
+		const stage = tc < duration * 0.45 ? 1 : 2;
 		// Pour first: a few big drops of the object's colour land inside it
 		// (sized to fit), then the brush pulls them out into the wash.
 		{
@@ -850,7 +987,7 @@ export function planComposition( an, { duration, seed, density = 1, fineDetail =
 			for ( const i of item.own ) {
 				m[ i ] = 1;
 			}
-			const pours = packDiscs( m, depthInside( m, W, H, B ), new Uint8Array( N ), { W, H, maxR: B * 0.09, minR: B * 0.025, jitter: 0.3, seam: 0, rng, limit: 2 + rng.int( 3 ) } );
+			const pours = packDiscs( m, depthInside( m, W, H, B ), new Uint8Array( N ), { W, H, maxR: B * 0.1, minR: B * 0.02, jitter: 0.3, seam: 0, rng, limit: 4 + rng.int( 5 ) } );
 			for ( const d of pours ) {
 				fixedOps.push( {
 					type: 'wash',
@@ -861,15 +998,16 @@ export function planComposition( an, { duration, seed, density = 1, fineDetail =
 					fit: d.fit,
 					drop: true,
 					level: 1,
-					amount: 0.35,
-					water: rng.range( 0.8, 1.0 ),
+					amount: 0.6,
+					// Darks rich and dry, lights wet: dark paint must not wick out.
+					water: ( 0.35 + 0.5 * pigments[ main ].L ) * rng.range( 0.9, 1.1 ),
 					chaos: 0.2,
-					stage,
-					t: tc,
+					stage: 0,
+					t: td,
 					seed: rng.u32(),
 					fixed: true,
 				} );
-				tc += rng.range( 0.5, 0.9 );
+				td += rng.range( 0.5, 0.9 );
 			}
 		}
 		for ( const st of item.strokes ) {
@@ -926,7 +1064,7 @@ export function planComposition( an, { duration, seed, density = 1, fineDetail =
 				charges.push( { k, d } );
 			}
 		}
-		let tw = tc - rng.range( 0.4, 1.2 );
+		let tw = td;
 		for ( const { k, d } of charges ) {
 			tw += rng.range( 0.25, 0.7 );
 			fixedOps.push( {
@@ -940,16 +1078,17 @@ export function planComposition( an, { duration, seed, density = 1, fineDetail =
 				level: 0,
 				amount: 0.5,
 				// Charged into wet paint: lots of water so it melts in softly.
-				water: rng.range( 0.8, 1.05 ),
+				water: ( 0.35 + 0.55 * pigments[ k ].L ) * rng.range( 0.9, 1.1 ),
 				soft: 0.75,
 				chaos: 0.15,
-				stage,
+				stage: 0,
 				t: Math.max( 0, tw ),
 				seed: rng.u32(),
 				fixed: true,
 			} );
 		}
 		// A breath before the next object.
+		td = tw + rng.range( 0.4, 1.0 );
 		tc += rng.range( 0.4, 1.0 );
 	}
 
@@ -1023,81 +1162,137 @@ export function planComposition( an, { duration, seed, density = 1, fineDetail =
 	// tip widening and narrowing with it. One hand, natural pace: strokes fit
 	// in the time the stage allows, most visible first; the rest is left to
 	// the step-back passes and corrections.
+	// One shape is one shape whatever pigments mix in it (a brow is two
+	// darks): shapes are found across colours, the main pigment paints the
+	// spine and a secondary one glazes along it. A shape is painted whole or
+	// not at all.
+	const resid = ( k, i ) => {
+		const v = T[ 0 ][ k ][ i ];
+		if ( v <= 0.08 ) {
+			return 0;
+		}
+		const r = v - T[ 1 ][ k ][ i ];
+		return r > 0.05 ? r : leftover[ k ] && leftover[ k ][ i ] ? v : 0;
+	};
+	const inShape = ( i ) => {
+		for ( let k = 0; k < K; k++ ) {
+			if ( ! pigments[ k ].isPaper && resid( k, i ) > 0 ) {
+				return true;
+			}
+		}
+		return false;
+	};
 	const shapes = [];
 	const seen = new Uint8Array( N );
 	const stack = new Int32Array( N );
-	for ( let k = 0; k < K; k++ ) {
-		if ( pigments[ k ].isPaper ) {
+	for ( let s0 = 0; s0 < N; s0++ ) {
+		if ( seen[ s0 ] || ! inShape( s0 ) ) {
 			continue;
 		}
-		const T0k = T[ 0 ][ k ];
-		const T1k = T[ 1 ][ k ];
-		const rest = leftover[ k ];
-		const inShape = ( i ) => ( T0k[ i ] > 0.08 && T0k[ i ] - T1k[ i ] > 0.05 ) || ( rest && rest[ i ] );
-		seen.fill( 0 );
-		for ( let s0 = 0; s0 < N; s0++ ) {
-			if ( seen[ s0 ] || ! inShape( s0 ) ) {
-				continue;
-			}
-			let sp = 0;
-			stack[ sp++ ] = s0;
-			seen[ s0 ] = 1;
-			const cells = [];
-			while ( sp > 0 ) {
-				const i = stack[ --sp ];
-				cells.push( i );
-				const x = i % W;
-				const y = ( i / W ) | 0;
-				const nb = [ x > 0 ? i - 1 : -1, x < W - 1 ? i + 1 : -1, y > 0 ? i - W : -1, y < H - 1 ? i + W : -1 ];
-				for ( const j2 of nb ) {
-					if ( j2 >= 0 && ! seen[ j2 ] && inShape( j2 ) ) {
-						seen[ j2 ] = 1;
-						stack[ sp++ ] = j2;
-					}
+		let sp = 0;
+		stack[ sp++ ] = s0;
+		seen[ s0 ] = 1;
+		const cells = [];
+		while ( sp > 0 ) {
+			const i = stack[ --sp ];
+			cells.push( i );
+			const x = i % W;
+			const y = ( i / W ) | 0;
+			const nb = [ x > 0 ? i - 1 : -1, x < W - 1 ? i + 1 : -1, y > 0 ? i - W : -1, y < H - 1 ? i + W : -1 ];
+			for ( const j2 of nb ) {
+				if ( j2 >= 0 && ! seen[ j2 ] && inShape( j2 ) ) {
+					seen[ j2 ] = 1;
+					stack[ sp++ ] = j2;
 				}
 			}
-			if ( cells.length < 3 ) {
-				continue;
-			}
-			// The fine brush follows each shape's centreline.
-			let mass = 0;
-			for ( const c of cells ) {
-				mass += Math.max( 0.05, T0k[ c ] - T1k[ c ] ) * importance[ c ];
-			}
-			const strokes = centrelineStrokes( cells, W );
-			for ( const st of strokes ) {
-				shapes.push( { k, st, mass: mass / strokes.length } );
+		}
+		if ( cells.length < 4 ) {
+			continue;
+		}
+		const masses = new Float64Array( K );
+		let imp = 0;
+		for ( const c of cells ) {
+			imp += importance[ c ];
+			for ( let k = 0; k < K; k++ ) {
+				if ( ! pigments[ k ].isPaper ) {
+					masses[ k ] += resid( k, c );
+				}
 			}
 		}
+		let k1 = -1;
+		let k2 = -1;
+		for ( let k = 0; k < K; k++ ) {
+			if ( k1 < 0 || masses[ k ] > masses[ k1 ] ) {
+				k2 = k1;
+				k1 = k;
+			} else if ( k2 < 0 || masses[ k ] > masses[ k2 ] ) {
+				k2 = k;
+			}
+		}
+		const strokes = spineStrokes( cells, W );
+		let len = 0;
+		let rr = 0;
+		for ( const st of strokes ) {
+			len += st.len;
+			rr += st.r;
+		}
+		rr /= Math.max( 1, strokes.length );
+		// No fiddly dabs: the shape as a whole must make a real stroke.
+		if ( ! strokes.length || len < Math.max( 3 * rr, B * 0.02 ) ) {
+			continue;
+		}
+		const glaze = k2 >= 0 && masses[ k2 ] >= 0.3 * masses[ k1 ] ? k2 : -1;
+		let secs = 0;
+		for ( const st of strokes ) {
+			secs += ( 0.55 + st.len / ( B * 0.3 ) ) * ( glaze >= 0 ? 2 : 1 );
+		}
+		shapes.push( { k: k1, glaze, strokes, secs, mass: masses[ k1 ] * ( imp / cells.length ) } );
 	}
 	// Most visible shapes first, within the time one hand has in this stage.
 	shapes.sort( ( a, b ) => b.mass - a.mass );
 	const handSeconds = ( STAGES[ 4 ].t1 - STAGES[ 4 ].t0 ) * duration * 0.5 * fineDetail.strokes * density;
 	let used = 0;
 	for ( const sh of shapes ) {
-		// No fiddly dabs: a detail stroke must be a real stroke.
-		if ( sh.st.len < Math.max( 3 * sh.st.r, B * 0.02 ) ) {
+		if ( used + sh.secs > handSeconds ) {
 			continue;
 		}
-		const secs = 0.55 + sh.st.len / ( B * 0.3 );
-		if ( used + secs > handSeconds ) {
-			continue;
+		used += sh.secs;
+		const order = darkness[ at( sh.strokes[ 0 ].x, sh.strokes[ 0 ].y ) ] + rng.range( 0, 0.2 );
+		for ( const st of sh.strokes ) {
+			add( 4, {
+				type: 'detail',
+				k: sh.k,
+				x: st.x,
+				y: st.y,
+				r: st.r,
+				path: st.pts,
+				trust: true,
+				amount: 0.95,
+				water: rng.range( 0.1, 0.16 ),
+				level: 0,
+				chaos: 0.1,
+				requireDry: true,
+				order,
+			} );
+			if ( sh.glaze >= 0 ) {
+				// A second, thin layer along the same spine with the other dark.
+				add( 4, {
+					type: 'detail',
+					k: sh.glaze,
+					x: st.x,
+					y: st.y,
+					r: st.r * 0.85,
+					path: st.pts,
+					trust: true,
+					amount: 0.85,
+					water: rng.range( 0.1, 0.16 ),
+					level: 0,
+					chaos: 0.1,
+					requireDry: true,
+					order: order + 0.05,
+				} );
+			}
 		}
-		used += secs;
-		add( 4, {
-			type: 'detail',
-			k: sh.k,
-			x: sh.st.x,
-			y: sh.st.y,
-			r: sh.st.r,
-			path: sh.st.pts,
-			amount: 0.95,
-			water: rng.range( 0.1, 0.16 ),
-			level: 0,
-			chaos: 0.1,
-			requireDry: true,
-			order: darkness[ at( sh.st.x, sh.st.y ) ] + rng.range( 0, 0.2 ),
-		} );
 	}
 
 	/* 5. Splashes & accents: decorative, in the background, off the edges */
@@ -1110,7 +1305,8 @@ export function planComposition( an, { duration, seed, density = 1, fineDetail =
 		if ( ! p ) {
 			break;
 		}
-		add( 5, {
+		// Splashes belong to the loose first act, with the drops.
+		add( 0, {
 			type: 'splash',
 			k: -1,
 			x: p.x,
@@ -1481,9 +1677,17 @@ export function planGapStrokes( model, an, { budget, seed, handX, handY } ) {
 			if ( cells.length < 4 ) {
 				continue;
 			}
-			const strokes = centrelineStrokes( cells, W ).filter( ( st ) => st.len >= Math.max( 3 * st.r, B * 0.02 ) );
+			const strokes = spineStrokes( cells, W );
+			let total = 0;
+			for ( const st of strokes ) {
+				total += st.len;
+			}
+			if ( total < B * 0.02 ) {
+				continue;
+			}
 			for ( const st of strokes ) {
 				pieces.push( {
+					trust: true,
 					type: 'detail',
 					k,
 					x: st.x,
