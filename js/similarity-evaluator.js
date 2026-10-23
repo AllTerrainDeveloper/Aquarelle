@@ -194,6 +194,9 @@ export class SimilarityEvaluator {
 
 		const err = new Float32Array( EW * EH );
 		const signed = new Float32Array( EW * EH );
+		// Plain colour difference as the eye sees it (no importance weighting,
+		// no edge-alignment term): what Endless uses to pick where to work.
+		const de = new Float32Array( EW * EH );
 		const errU8 = new Uint8Array( EW * EH );
 		const W4 = c4.W;
 		let wsum = 0;
@@ -224,6 +227,7 @@ export class SimilarityEvaluator {
 				const e4 = this.dE4[ ( by >> 1 ) * W4 + ( bx >> 1 ) ];
 				const e = ( 0.45 * e1 + 0.3 * this.dE2[ b ] + 0.25 * e4 ) * ( 0.45 + imp ) + 12 * Math.min( 1, st ) * imp;
 				err[ b ] = e;
+				de[ b ] = 0.45 * e1 + 0.3 * this.dE2[ b ] + 0.25 * e4;
 				signed[ b ] = ( 100 * sl ) / n;
 				errU8[ b ] = Math.min( 255, e * 5 );
 				wsum += imp;
@@ -240,7 +244,7 @@ export class SimilarityEvaluator {
 		};
 		scores.similarity = combineScore( scores );
 		scores.ms = performance.now() - t0;
-		return { err, signed, errU8, EW, EH, scores };
+		return { err, de, signed, errU8, EW, EH, scores };
 	}
 
 	/**

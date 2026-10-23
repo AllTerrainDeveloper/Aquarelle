@@ -85,13 +85,13 @@ self.onmessage = ( e ) => {
 				break;
 			}
 			case 'planLayer': {
-				const res = planLayer( layerCtx, msg.layer, { cur: new Float32Array( msg.cur ), handX: msg.handX, handY: msg.handY, seed: msg.seed, unlimited: msg.unlimited } );
+				const res = planLayer( layerCtx, msg.layer, { cur: new Float32Array( msg.cur ), handX: msg.handX, handY: msg.handY, seed: msg.seed, loaded: msg.loaded, unlimited: msg.unlimited, round: msg.round, region: msg.region, signed: msg.signed ? new Float32Array( msg.signed ) : null, EW: msg.EW, EH: msg.EH } );
 				reply( res, [ res.target.buffer, res.dens.buffer ] );
 				break;
 			}
 			case 'evaluate': {
 				const res = evaluator.evaluate( new Float32Array( msg.D ) );
-				reply( res, [ res.err.buffer, res.signed.buffer, res.errU8.buffer ] );
+				reply( res, [ res.err.buffer, res.de.buffer, res.signed.buffer, res.errU8.buffer ] );
 				break;
 			}
 			case 'evaluateRendered': {

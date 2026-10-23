@@ -33,12 +33,17 @@ uniform float uGran;
 uniform float uWarp;
 uniform float uTexel;
 uniform int uView;
+uniform float uSheen;
+uniform vec4 uCam;
+uniform float uFine;
 in vec2 vUv;
 out vec4 outColor;
 
 vec4 dens( vec2 uv ) {
 	vec2 p = uv * uSim - 0.5;
 	vec2 f = fract( p );
+	// Smooth (C1) blending between cells: no visible grid when seen up close.
+	f = f * f * ( 3.0 - 2.0 * f );
 	ivec2 i0 = ivec2( floor( p ) );
 	ivec2 mx = ivec2( uSim ) - 1;
 	vec4 a = texelFetch( uDens, clamp( i0, ivec2( 0 ), mx ), 0 );
@@ -57,13 +62,20 @@ vec3 heat( float e ) {
 }
 
 void main() {
-	vec2 puv = vUv * uPaperScale;
+	// The camera: which part of the sheet this pixel shows (Cinematic).
+	vec2 sv = uCam.xy + vUv * uCam.zw;
+	if ( any( lessThan( sv, vec2( 0.0 ) ) ) || any( greaterThan( sv, vec2( 1.0 ) ) ) ) {
+		// The desk around the sheet (the overlay draws it over this).
+		outColor = vec4( 0.847, 0.82, 0.769, 1.0 );
+		return;
+	}
+	vec2 puv = sv * uPaperScale;
 	vec4 pp = texture( uPaper, puv );
 	float ph = pp.r;
 	// Organic edges: warp the lookup with low and high frequency paper noise.
 	vec2 warpLo = ( texture( uPaper, puv * 0.23 + 0.31 ).gb - 0.5 ) * uWarp;
 	vec2 warpHi = vec2( texture( uPaper, puv * 1.7 ).a, texture( uPaper, puv * 1.7 + 0.5 ).a ) - 0.5;
-	vec2 uv = vUv + ( warpLo + warpHi * 0.9 ) / uSim;
+	vec2 uv = sv + ( warpLo + warpHi * 0.9 ) / uSim;
 	vec4 d = dens( uv );
 	vec3 D = max( d.rgb, 0.0 );
 	// Pigment pooling along density fronts (subtle; the simulation does the rest).
@@ -78,7 +90,7 @@ void main() {
 	float g = 1.0 + uGran * ( 0.5 - ph ) * 2.0 * smoothstep( 0.02, 0.6, dm );
 	g *= 1.0 + 0.08 * ( pp.a - 0.5 ) * smoothstep( 0.0, 0.5, dm );
 	// Cold-press sheet: uneven sizing, scattered fibres, warm off-white.
-	float sizing = texture( uPaper, vUv * uPaperScale * 0.11 + 0.17 ).g - 0.5;
+	float sizing = texture( uPaper, sv * uPaperScale * 0.11 + 0.17 ).g - 0.5;
 	float fibre = smoothstep( 0.62, 0.8, texture( uPaper, puv * 2.3 + 0.41 ).a ) * smoothstep( 0.55, 0.75, texture( uPaper, puv * 0.9 ).b );
 	vec3 paper = uPaperColor * ( 1.0 + 0.035 * sizing ) - vec3( 0.025, 0.03, 0.04 ) * fibre;
 	vec3 col = paper * exp( -D * g );
@@ -89,17 +101,27 @@ void main() {
 	float hy2 = texture( uPaper, puv * 0.5 + vec2( 0.0, uTexel ) ).r - texture( uPaper, puv * 0.5 - vec2( 0.0, uTexel ) ).r;
 	float relief = 0.2 * ( hx + hy ) + 0.12 * ( hx2 + hy2 );
 	col *= 1.0 + relief + 0.06 * ( ph - 0.5 );
+	// Up close (Cinematic) the sheet shows a finer tooth too.
+	if ( uFine > 0.0 ) {
+		vec2 fuv = puv * 3.7 + 0.29;
+		float fx = texture( uPaper, fuv + vec2( uTexel, 0.0 ) ).r - texture( uPaper, fuv - vec2( uTexel, 0.0 ) ).r;
+		float fy = texture( uPaper, fuv + vec2( 0.0, uTexel ) ).r - texture( uPaper, fuv - vec2( 0.0, uTexel ) ).r;
+		col *= 1.0 + uFine * ( 0.09 * ( fx + fy ) + 0.025 * ( texture( uPaper, fuv ).r - 0.5 ) );
+	}
 	// The sheet catches a little less light toward its edges.
-	vec2 edgeD = min( vUv, 1.0 - vUv );
+	vec2 edgeD = min( sv, 1.0 - sv );
 	col *= 0.97 + 0.03 * smoothstep( 0.0, 0.06, min( edgeD.x, edgeD.y ) );
 	// Wet paint reads darker and glossier.
 	float wet = smoothstep( 0.01, 0.45, w );
-	col *= 1.0 - 0.08 * wet;
-	col += wet * 0.06 * max( 0.0, hx + hy );
+	col *= 1.0 - 0.08 * uSheen * wet;
+	col += wet * 0.06 * uSheen * max( 0.0, hx + hy );
+	// Up close (Cinematic) a wet wash is a film of water: it catches the light
+	// as a soft glare that drifts with the paper's tooth.
+	col += wet * max( 0.0, uSheen - 1.0 ) * ( 0.025 + 0.05 * smoothstep( 0.0, 0.6, hx2 + hy2 + 0.5 * ( hx + hy ) ) );
 	if ( uView == 1 ) {
 		col = mix( col, vec3( 0.15, 0.4, 0.95 ), wet * 0.75 );
 	} else if ( uView == 2 ) {
-		float e = texture( uErr, vUv ).r;
+		float e = texture( uErr, sv ).r;
 		col = mix( col * 0.6 + 0.2, heat( e ), 0.7 );
 	}
 	outColor = vec4( toSrgb( clamp( col, 0.0, 1.0 ) ), 1.0 );
@@ -132,7 +154,7 @@ export class WatercolorRenderer {
 		}
 		this.prog = prog;
 		this.u = {};
-		for ( const name of [ 'uDens', 'uPaper', 'uErr', 'uSim', 'uPaperScale', 'uPaperColor', 'uGran', 'uWarp', 'uTexel', 'uView' ] ) {
+		for ( const name of [ 'uDens', 'uPaper', 'uErr', 'uSim', 'uPaperScale', 'uPaperColor', 'uGran', 'uWarp', 'uTexel', 'uView', 'uSheen', 'uCam', 'uFine' ] ) {
 			this.u[ name ] = gl.getUniformLocation( prog, name );
 		}
 		this.vao = gl.createVertexArray();
@@ -147,6 +169,13 @@ export class WatercolorRenderer {
 		this.errTex = null;
 		this.paperTex = null;
 		this.view = 0;
+		// How glossy wet paint looks (1: as usual; Cinematic shows it more).
+		this.sheen = 1;
+		// The part of the sheet the canvas shows: origin and size in sheet
+		// units (the whole sheet by default; Cinematic's camera moves it).
+		this.cam = [ 0, 0, 1, 1 ];
+		// Extra fine paper grain when the camera is close (0–1).
+		this.fine = 0;
 		this.needsDraw = true;
 		this.paperColor = [ 1, 1, 1 ];
 	}
@@ -229,7 +258,18 @@ export class WatercolorRenderer {
 		this.needsDraw = true;
 	}
 
-	_draw( w, h, view ) {
+	setCamera( x, y, w, h, fine = 0 ) {
+		this.cam = [ x, y, w, h ];
+		this.fine = fine;
+		this.needsDraw = true;
+	}
+
+	setSheen( v ) {
+		this.sheen = v;
+		this.needsDraw = true;
+	}
+
+	_draw( w, h, view, cam = this.cam ) {
 		const gl = this.gl;
 		gl.viewport( 0, 0, w, h );
 		gl.useProgram( this.prog );
@@ -253,6 +293,9 @@ export class WatercolorRenderer {
 		gl.uniform1f( this.u.uWarp, 2.2 );
 		gl.uniform1f( this.u.uTexel, 1.2 / this.paperSize );
 		gl.uniform1i( this.u.uView, view );
+		gl.uniform1f( this.u.uSheen, this.sheen );
+		gl.uniform4fv( this.u.uCam, cam );
+		gl.uniform1f( this.u.uFine, cam === this.cam ? this.fine : 0 );
 		gl.drawArrays( gl.TRIANGLES, 0, 3 );
 	}
 
@@ -274,7 +317,7 @@ export class WatercolorRenderer {
 		const fb = gl.createFramebuffer();
 		gl.bindFramebuffer( gl.FRAMEBUFFER, fb );
 		gl.framebufferTexture2D( gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0 );
-		this._draw( w, h, 0 );
+		this._draw( w, h, 0, [ 0, 0, 1, 1 ] );
 		const px = new Uint8Array( w * h * 4 );
 		gl.readPixels( 0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, px );
 		gl.bindFramebuffer( gl.FRAMEBUFFER, null );

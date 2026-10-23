@@ -17,12 +17,21 @@ import { boxBlur } from './image-analyzer.js';
 
 const PROFILE_N = 64;
 
+// Cinematic: seconds the brush takes to come down onto the paper (and to lift).
+const CINE_APPROACH = 0.4;
+// Cinematic: the fastest the brush moves along a stroke (cells per second),
+// from fine marks (size 0) to broad washes (size 1).
+const handSpeed = ( B, size ) => B * ( 0.08 + 0.22 * size );
+
 export class SplashGenerator {
 	constructor( model, analysis, drying ) {
 		this.model = model;
 		this.an = analysis;
 		this.drying = drying;
 		this.complexity = 1;
+		// Drops and splashes off: the brush paints those marks instead (the
+		// splash code is kept for later, e.g. painting by hand).
+		this.noSplashes = false;
 		this.animator = null;
 		// The pigment currently on the brush, and where the brush last was.
 		this.loaded = -1;
@@ -206,7 +215,7 @@ export class SplashGenerator {
 	 */
 	_brush( rng, op, x, y, r, k, extra = {}, delay = 0 ) {
 		const anim = this.animator;
-		const backlog = anim ? anim.brushFreeAt - this.now : 0;
+		const backlog = anim ? anim.backlog( this.now ) : 0;
 		if ( anim && ! extra.queue && backlog > 1.2 ) {
 			// Too close to a border for a blot: leave it for a later brush pass.
 			const room = this.roomAt( x, y );
@@ -215,7 +224,7 @@ export class SplashGenerator {
 			}
 			return null;
 		}
-		if ( anim && extra.queue && backlog > 3 ) {
+		if ( anim && extra.queue && ! extra.keep && backlog > 3 ) {
 			// The hand is busy: this mark is left for a later pass.
 			return null;
 		}
@@ -225,7 +234,15 @@ export class SplashGenerator {
 		this.handX = x;
 		this.handY = y;
 		const B = this.an.B;
-		const dir = extra.rot ?? rng.range( 0, Math.PI * 2 );
+		// Cinematic: washes are laid in near-horizontal bands, starting from
+		// the end nearer the hand (top-left or bottom-right), so one stroke
+		// carries on from the last.
+		let dir = extra.rot ?? rng.range( 0, Math.PI * 2 );
+		if ( undefined === extra.rot && anim && anim.cinematic ) {
+			const from = anim.lastEnd || { x: x - r, y: y - r };
+			const nearTopLeft = Math.hypot( x - r - from.x, y - r - from.y ) <= Math.hypot( x + r - from.x, y + r - from.y );
+			dir = ( nearTopLeft ? 0 : Math.PI ) + rng.range( -0.12, 0.12 );
+		}
 		const dx = Math.cos( dir );
 		const dy = Math.sin( dir );
 		// Detail strokes are long and thin along a contour; washes are
@@ -261,7 +278,7 @@ export class SplashGenerator {
 			// Contour strokes are meant to sit on the edge: they only need the
 			// colour to belong there (their tip is sized to the shape).
 			const roomy = contour || extra.fitR || this.roomAt( pt.x, pt.y ) >= tr * keepIn;
-			const ok = inside && roomy && ( k < 0 || this.belongs( k, pt.x, pt.y ) );
+			const ok = inside && roomy && ( k < 0 || extra.trust || this.belongs( k, pt.x, pt.y ) );
 			path[ j * 4 + 3 ] = ok ? tr : 0;
 		}
 		// No dabs: a touch shorter than a few tip-widths would leave a dot, so
@@ -283,6 +300,33 @@ export class SplashGenerator {
 			}
 			j = e;
 		}
+		// Cinematic: the hand brushes only the part of the path that paints
+		// (coming down at the first touch, lifting after the last), instead of
+		// sweeping on over the desk around a wash near the edge.
+		// A stroke with nothing to paint is never made (the hand would mime it).
+		let paints = false;
+		for ( let j = 0; j < M && ! paints; j++ ) {
+			paints = path[ j * 4 + 3 ] > 0;
+		}
+		if ( ! paints ) {
+			return null;
+		}
+		let p0 = 0;
+		let p1 = 1;
+		if ( anim && anim.cinematic ) {
+			let j0 = 0;
+			let j1 = M - 1;
+			while ( j0 < M && ! path[ j0 * 4 + 3 ] ) {
+				j0++;
+			}
+			while ( j1 > j0 && ! path[ j1 * 4 + 3 ] ) {
+				j1--;
+			}
+			if ( j0 < M ) {
+				p0 = j0 / M;
+				p1 = ( j1 + 1 ) / M;
+			}
+		}
 		const blob = {
 			brush: true,
 			k,
@@ -296,9 +340,15 @@ export class SplashGenerator {
 		};
 		// Small marks are quick flicks of a fine brush; washes take their time.
 		const size = Math.min( 1, ( contour ? r : R ) / ( B * 0.025 ) );
-		const dur = ( 0.25 + passes * rng.range( 0.4, 0.6 ) ) * ( extra.slow ?? 1 ) * ( 0.45 + 0.55 * size );
-		const approach = 0.08 + 0.14 * size;
-		const start = anim ? Math.max( this.now + delay, anim.brushFreeAt + approach ) : 0;
+		let dur = ( 0.25 + passes * rng.range( 0.4, 0.6 ) ) * ( extra.slow ?? 1 ) * ( 0.45 + 0.55 * size );
+		if ( anim && anim.cinematic ) {
+			// Seen up close, a hand never races: fine marks slow, washes broader.
+			dur = Math.max( 0.3, Math.max( dur, Math.min( ( passes * 2 * R ) / handSpeed( B, size ), Math.max( dur * 1.5, 6 ) ) ) * ( p1 - p0 ) );
+		}
+		// Cinematic: the brush is seen coming down onto the paper and lifting off.
+		const approach = anim && anim.cinematic ? CINE_APPROACH : 0.08 + 0.14 * size;
+		const j0 = Math.min( M - 1, Math.floor( p0 * M ) );
+		const start = anim ? anim.nextBrush( this.now + delay, approach, k, path[ j0 * 4 ], path[ j0 * 4 + 1 ] ) : 0;
 		if ( anim ) {
 			anim.brushFreeAt = start + dur + approach;
 		}
@@ -316,6 +366,8 @@ export class SplashGenerator {
 			tip,
 			dx,
 			dy,
+			p0,
+			p1,
 		} );
 		return { start, dur };
 	}
@@ -328,7 +380,7 @@ export class SplashGenerator {
 		const anim = this.animator;
 		// Object washes are never skipped: they queue and the timeline waits.
 		// Optional fine work is let go when the hand is far behind.
-		if ( anim && 'sweep' !== op.type && anim.brushFreeAt - this.now > 3 ) {
+		if ( anim && 'sweep' !== op.type && anim.backlog( this.now ) > 3 ) {
 			return null;
 		}
 		const pts = op.path;
@@ -382,9 +434,15 @@ export class SplashGenerator {
 		};
 		const B = this.an.B;
 		const tip = op.r ?? 1.5;
-		const dur = op.speed ? Math.min( 8, 0.2 + total / op.speed ) : Math.min( 2.6, 0.25 + total / ( B * 0.3 ) );
-		const approach = 0.08 + 0.14 * Math.min( 1, tip / ( B * 0.025 ) );
-		const start = anim ? Math.max( this.now + delay, anim.brushFreeAt + approach ) : 0;
+		let dur = op.speed ? Math.min( 8, 0.2 + total / op.speed ) : Math.min( 2.6, 0.25 + total / ( B * 0.3 ) );
+		if ( anim && anim.cinematic ) {
+			// ...but a long wash (rows across a whole shape) keeps moving: never
+			// more than half again its usual time, or 6 s.
+			dur = Math.max( dur, Math.min( total / handSpeed( B, Math.min( 1, tip / ( B * 0.025 ) ) ), Math.max( dur * 1.5, 6 ) ) );
+		}
+		// Cinematic: the brush is seen coming down onto the paper and lifting off.
+		const approach = anim && anim.cinematic ? CINE_APPROACH : 0.08 + 0.14 * Math.min( 1, tip / ( B * 0.025 ) );
+		const start = anim ? anim.nextBrush( this.now + delay, approach, k, pts[ 0 ], pts[ 1 ] ) : 0;
 		if ( anim ) {
 			anim.brushFreeAt = start + dur + approach;
 		}
@@ -397,6 +455,17 @@ export class SplashGenerator {
 	 * satellite droplets (particles) that bloom where they land.
 	 */
 	_drop( rng, op, x, y, r, k, { crown = 0, spray = 0, extra = {}, delay = 0, color, fit = Infinity } = {} ) {
+		if ( this.noSplashes ) {
+			// Drops and splashes off: the brush paints the same mark, a short
+			// touch that stays within the room the drop had.
+			// One short, deliberate touch, laid along the way the hand is going.
+			const R = Math.max( 1, Math.min( r, fit ) );
+			const from = this.animator && this.animator.lastEnd;
+			const rot = from ? Math.atan2( y - from.y, x - from.x ) : 0;
+			// Like the drop it replaces, it paints where it lands.
+			this._brush( rng, op, x, y, R, k, { queue: true, keep: true, trust: true, passes: 1, aspect: 1, rot, water: extra.water }, delay );
+			return;
+		}
 		const an = this.an;
 		const fall = rng.range( 0.3, 0.42 );
 		const start = this.now + delay + fall;
@@ -622,7 +691,8 @@ export class SplashGenerator {
 
 			case 'lift': {
 				// A clean damp brush blots the spot; pigment comes off as it finishes.
-				const lift = { x, y, r, strength: op.strength ?? 0.5, seed: rng.u32() };
+				// `wet`: how damp the brush is (1 = usual; Endless lifts barely damp).
+				const lift = { x, y, r, strength: op.strength ?? 0.5, wet: op.wet ?? 1, seed: rng.u32() };
 				if ( ! this.animator ) {
 					model.lift( lift );
 					return true;
@@ -630,8 +700,9 @@ export class SplashGenerator {
 				const anim = this.animator;
 				// A tiny spot is a quick dab; a big blot takes its time.
 				const u = Math.min( 1, r / ( this.an.B * 0.02 ) );
-				const approach = 0.1 + 0.12 * u;
-				const start = Math.max( this.now, anim.brushFreeAt + approach );
+				// Cinematic: the brush is seen coming down onto the paper and lifting off.
+				const approach = anim && anim.cinematic ? CINE_APPROACH : 0.1 + 0.12 * u;
+				const start = anim.nextBrush( this.now, approach, -1, x, y );
 				const dur = 0.25 + 0.45 * u;
 				anim.brushFreeAt = start + dur + approach;
 				const dir = rng.range( 0, Math.PI * 2 );

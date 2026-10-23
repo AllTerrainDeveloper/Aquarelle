@@ -390,7 +390,7 @@ export function expandCells( cells, W, H, margin, accept ) {
  *
  * @return {Object[]} strokes { pts: [x, y, r]..., len, r, x, y }
  */
-export function spineStrokes( cells, W, { minR = 0.7, maxStrokes = 8 } = {} ) {
+export function spineStrokes( cells, W, { minR = 0.7, maxStrokes = 60 } = {} ) {
 	let x0 = Infinity;
 	let y0 = Infinity;
 	let x1 = -Infinity;
@@ -465,8 +465,31 @@ export function spineStrokes( cells, W, { minR = 0.7, maxStrokes = 8 } = {} ) {
 		for ( let c = b; c >= 0; c = parent[ c ] ) {
 			path.push( c );
 		}
+		// A painter draws a branch out from where it joins: start the stroke
+		// at the end that touches what is already painted.
+		const touches = ( c ) => NB.some( ( o ) => covered[ c + o ] );
+		if ( s > 0 && path.length > 1 && touches( path[ path.length - 1 ] ) && ! touches( path[ 0 ] ) ) {
+			path.reverse();
+		}
+		// The first stroke goes from the thicker end to the thinner one (a
+		// trunk upward, a brow from its root), as the brush loads and lifts.
+		if ( 0 === s && path.length > 1 ) {
+			const ends = ( from ) => {
+				let d = 0;
+				const n = Math.min( path.length, 6 );
+				for ( let q = 0; q < n; q++ ) {
+					d += depth[ path[ from ? path.length - 1 - q : q ] ];
+				}
+				return d / n;
+			};
+			if ( ends( true ) > ends( false ) ) {
+				path.reverse();
+			}
+		}
 		if ( path.length < 2 && s > 0 ) {
-			break;
+			// A speck left over: cover it and go on to the next branch.
+			covered[ path[ 0 ] ] = 1;
+			continue;
 		}
 		// Light smoothing (a 5-cell moving average) keeps it inside thin shapes.
 		const pts = [];
@@ -1863,4 +1886,81 @@ export function strokeAngle( cells, W, gx, gy ) {
 		return 0.5 * Math.atan2( 2 * cxy, cxx - cyy );
 	}
 	return 0;
+}
+
+/**
+ * The soft borders of a shape (where the image has no real edge), traced
+ * as continuous lines for a damp, clean brush: run along the edge while the
+ * shape is still wet, it lets the colour fade out instead of stopping hard.
+ * Returns strokes like sweepStrokes ({ pts: [x, y, r, ...], len, r, x, y }).
+ */
+export function softEdgeStrokes( cells, W, H, edgeNear, tip, maxSamples = 260 ) {
+	const inShape = new Set( cells );
+	// Border cells on a soft edge (not on the sheet's own edge).
+	const pts = [];
+	const key = new Map();
+	for ( const i of cells ) {
+		const x = i % W;
+		const y = ( i / W ) | 0;
+		if ( x === 0 || y === 0 || x === W - 1 || y === H - 1 || edgeNear[ i ] ) {
+			continue;
+		}
+		if ( ! inShape.has( i - 1 ) || ! inShape.has( i + 1 ) || ! inShape.has( i - W ) || ! inShape.has( i + W ) ) {
+			key.set( i, pts.length );
+			pts.push( i );
+		}
+	}
+	const used = new Uint8Array( pts.length );
+	const next = ( i ) => {
+		const x = i % W;
+		for ( const d of [ 1, -1, W, -W, W + 1, W - 1, -W + 1, -W - 1 ] ) {
+			const j = i + d;
+			const q = key.get( j );
+			if ( undefined !== q && ! used[ q ] && Math.abs( ( j % W ) - x ) <= 1 ) {
+				return q;
+			}
+		}
+		return -1;
+	};
+	const strokes = [];
+	for ( let s0 = 0; s0 < pts.length; s0++ ) {
+		if ( used[ s0 ] ) {
+			continue;
+		}
+		// Walk both ways from the seed so a line is not split in the middle.
+		const walk = ( q0 ) => {
+			const seq = [];
+			let q = q0;
+			while ( q >= 0 ) {
+				used[ q ] = 1;
+				seq.push( q );
+				q = next( pts[ q ] );
+			}
+			return seq;
+		};
+		used[ s0 ] = 1;
+		const fwd = walk( next( pts[ s0 ] ) );
+		const back = walk( next( pts[ s0 ] ) );
+		const order = back.filter( ( q ) => q >= 0 ).reverse().concat( [ s0 ], fwd.filter( ( q ) => q >= 0 ) );
+		if ( order.length < 6 ) {
+			continue;
+		}
+		const raw = [];
+		for ( const q of order ) {
+			raw.push( pts[ q ] % W, ( pts[ q ] / W ) | 0, tip );
+		}
+		const sm = smoothPath( raw, Math.max( 0.6, tip * 0.45 ) );
+		for ( let o = 0; o < sm.length; o += maxSamples * 3 ) {
+			const part = sm.slice( o, o + maxSamples * 3 + 3 );
+			if ( part.length < 6 ) {
+				continue;
+			}
+			let len = 0;
+			for ( let q = 3; q < part.length; q += 3 ) {
+				len += Math.hypot( part[ q ] - part[ q - 3 ], part[ q + 1 ] - part[ q - 2 ] );
+			}
+			strokes.push( { pts: Float32Array.from( part ), len, r: tip, x: part[ 0 ], y: part[ 1 ], edge: false } );
+		}
+	}
+	return strokes;
 }

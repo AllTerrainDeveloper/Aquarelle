@@ -534,12 +534,23 @@ export class PigmentModel {
 		let ty1 = -1;
 		for ( let j = 0; j < P.length; j += 4 ) {
 			const sj = P[ j + 2 ];
-			const tr = P[ j + 3 ];
-			if ( sj < s0 || sj >= s1 || tr <= 0 ) {
+			let tr = P[ j + 3 ];
+			let cx = P[ j ];
+			let cy = P[ j + 1 ];
+			// The paint reaches exactly to where the tip is now (s1), not just to
+			// the last path point it passed: the line grows continuously instead
+			// of in steps. The rest of this segment is laid on later frames
+			// (each cell is painted once, so nothing doubles up).
+			let partial = false;
+			if ( sj >= s1 && s1 <= 1 && j >= 4 && P[ j - 2 ] < s1 && tr > 0 && P[ j - 1 ] > 0 ) {
+				const f = ( s1 - P[ j - 2 ] ) / Math.max( 1e-6, sj - P[ j - 2 ] );
+				cx = P[ j - 4 ] + ( cx - P[ j - 4 ] ) * f;
+				cy = P[ j - 3 ] + ( cy - P[ j - 3 ] ) * f;
+				tr = P[ j - 1 ] + ( tr - P[ j - 1 ] ) * f;
+				partial = true;
+			} else if ( sj < s0 || sj >= s1 || tr <= 0 ) {
 				continue;
 			}
-			const cx = P[ j ];
-			const cy = P[ j + 1 ];
 			// The stroke is a continuous ribbon: each step paints the capsule from
 			// the previous tip position to this one, its width blending between
 			// them, so the line is solid however far apart its points are.
@@ -658,6 +669,10 @@ export class PigmentModel {
 					ty1 = Math.max( ty1, y );
 				}
 			}
+			if ( partial ) {
+				// Everything further along is still ahead of the tip.
+				break;
+			}
 		}
 		if ( tx1 >= tx0 ) {
 			this._touch( tx0, ty0, tx1, ty1, k >= 0 ? 1 << k : 0, b.water > 0 );
@@ -701,7 +716,8 @@ export class PigmentModel {
 						bits |= 1 << k;
 					}
 				}
-				this.h[ i ] = Math.min( 1.6, this.h[ i ] + 0.12 * m );
+				// The damp brush leaves a little water behind (less when barely damp).
+				this.h[ i ] = Math.min( 1.6, this.h[ i ] + 0.12 * m * ( b.wet ?? 1 ) );
 			}
 		}
 		this._touch( x0, y0, x1, y1, bits, true );

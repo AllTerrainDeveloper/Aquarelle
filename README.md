@@ -14,17 +14,64 @@ Static site, no build step and no dependencies: serve the folder and open
 python3 -m http.server 8765
 ```
 
-**Controls:** pick a sample or drop an image; settings (colours, detail,
-duration) apply as soon as they change. **Paint** plays the painting in
-real time over the chosen duration; **Quick draw** time-lapses the painting
-(its planned duration plays in about 20 seconds) with no time limits: no
-shape, detail or gap is trimmed to fit, so it runs until everything is
-painted, every drop, splash and stroke. **Real time** is the painter's own
-pace: 1× with every animation, no time limits and no waiting (each layer
-starts as soon as the last is done). Whenever the painter can only wait
-for paint to dry (strokes queued for a wet area, the final drying), the
-clock runs 10× faster and the header shows "Drying ×10". The Duration slider does not apply to it. Speed, seed and
-the reference view are under *More options*.
+**Controls:** pick a sample or drop an image; settings (image type,
+colours, detail) apply as soon as they change. Choose how to paint with the
+tabs, then press **Paint** (it also pauses and resumes):
+
+- **Quick**: the whole painting time-lapsed (its planned duration plays in
+  about 20 seconds) with no time limits: nothing is trimmed, it runs until
+  every drop, splash and stroke is painted.
+- **Endless**: paints, then keeps refining (see below); its *Pace* is Quick
+  or Real time.
+- **Real time**: the painter's own pace, 1× with every animation; no time
+  limits and no waiting (each layer starts as soon as the last is done).
+  Whenever the painter can only wait for paint to dry, the clock runs 10×
+  faster and the header shows "Drying ×10".
+- **Custom**: fits the painting into the *time to spend* you choose, at the
+  playback speed you choose.
+- **Cinematic**: Real time, filmed. The sheet lies on a desk beside a water
+  jar and a palette with a well per colour. The camera follows the brush,
+  moving in close for fine marks and pulling back for washes and while paint
+  dries. Between colours, and whenever it runs dry, the brush goes to the
+  jar to rinse (the water clouds with what is rinsed) and loads up in the
+  next well. The brush is drawn hair by hair: strands bend behind the motion
+  with a little spring, splay under pressure and as the brush dries, and
+  carry the paint in their lower part. Wet washes catch the light. *Record
+  video* records what the camera sees. Everything moves on springs or eased
+  paths (the brush is carried through the air between all marks and comes
+  down onto the paper), the brush's tip sits on the paint as it is laid, the brush grows slowly for broad washes (capped on screen), it lifts clear off the sheet and over gaps, the camera frames each flight with its destination, and
+  the sheet is rendered for the camera's view at screen resolution, so it
+  stays sharp up close.
+
+In the open-ended modes (Quick, Endless, Real time, Cinematic) marks that
+are due wait in a small pool, and the painter takes the next one as the hand
+frees up: in the colour on the brush and nearest to the last stroke, among
+the marks planned for the next moment. The brush works its way across the
+sheet instead of hopping to wherever the next mark happens to be due.
+
+Seed, the brush and drops overlay, *Drops and splashes* and the reference
+view are under *More options*. Drops and splashes are off by default: the
+brush paints those marks instead (the splash code is kept).
+
+**Endless refinement:** after the painting, the picture is divided into a
+4×4 grid of areas scored by plain colour difference against the image (as
+the eye sees it, at fine and coarse scales). Each round goes to the area that
+looks least like it, judged on a fresh score taken after the last round,
+and works only there, guided by the measured
+error: where the painting is still lighter than the image it paints more
+(its colour, darker than planned if needed), where it is darker it lifts.
+Every third visit is a details pass. The painter never stays on one area:
+not the same one twice in a row, recent visits lower an area's priority,
+and an area that three visits in a row barely improved is set aside for a
+while. Each visit is stricter than the last;
+an area whose last two visits found nothing to do is finished, and when all
+are, it stops and says so. The live similarity score is shown throughout.
+
+**Clear water:** like a watercolourist, the painter also works with a
+clean brush. Big soft zones (a sky, a background) are wetted first so their
+colour goes in wet-in-wet and blends by itself, and after each mid-tone
+shape a damp brush runs along its soft borders (where the image has no
+real edge) so the colour fades out instead of stopping hard.
 
 **Photos:** *Image type* is detected automatically (shown as "Auto
 (photo)" or "Auto (illustration)") and can be forced. A photograph is

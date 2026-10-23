@@ -42,17 +42,38 @@
 				<label for="detail">Detail <output id="detailOut">Balanced</output></label>
 				<input type="range" id="detail" min="0" max="4" value="1">
 			</div>
-			<div class="field">
-				<label for="duration">Duration <output id="durOut">10 min</output></label>
-				<input type="range" id="duration" min="1" max="30" step="1" value="10">
-			</div>
 		</section>
 
 		<section class="group">
+			<div class="tabs" role="tablist" aria-label="How to paint">
+				<button type="button" role="tab" id="tab-quick" data-mode="quick" aria-controls="modePanel" aria-selected="true">Quick</button>
+				<button type="button" role="tab" id="tab-endless" data-mode="endless" aria-controls="modePanel" aria-selected="false" tabindex="-1">Endless</button>
+				<button type="button" role="tab" id="tab-realtime" data-mode="realtime" aria-controls="modePanel" aria-selected="false" tabindex="-1">Real time</button>
+				<button type="button" role="tab" id="tab-custom" data-mode="custom" aria-controls="modePanel" aria-selected="false" tabindex="-1">Custom</button>
+				<button type="button" role="tab" id="tab-cinematic" data-mode="cinematic" aria-controls="modePanel" aria-selected="false" tabindex="-1">Cinematic</button>
+			</div>
+			<div id="modePanel" class="mode-panel" role="tabpanel" aria-labelledby="tab-quick">
+				<p id="modeHint" class="muted small"></p>
+				<div class="field" id="endlessOpts" hidden>
+					<span class="label">Pace</span>
+					<div class="seg" role="radiogroup" aria-label="Pace">
+						<label><input type="radio" name="pace" value="quick" checked> Quick</label>
+						<label><input type="radio" name="pace" value="realtime"> Real time</label>
+					</div>
+				</div>
+				<div id="customOpts" hidden>
+					<div class="field">
+						<label for="duration">Time to spend <output id="durOut">10 min</output></label>
+						<input type="range" id="duration" min="1" max="30" step="1" value="10">
+					</div>
+					<div class="field">
+						<label for="speed">Playback speed <output id="speedOut">1×</output></label>
+						<input type="range" id="speed" min="0" max="8" value="2">
+					</div>
+				</div>
+			</div>
 			<div class="buttons">
 				<button id="start" type="button" class="primary" disabled>Paint</button>
-				<button id="quick" type="button" disabled title="The whole painting, time-lapsed: about 20 seconds, longer if it needs to finish everything">Quick draw</button>
-				<button id="realtime" type="button" disabled title="At the painter's own pace, with every animation; paints everything, never waits, ignores the duration">Real time</button>
 				<button id="restart" type="button" disabled aria-label="Restart" title="Restart">↺</button>
 			</div>
 			<div class="buttons">
@@ -64,14 +85,11 @@
 		<details class="group more">
 			<summary>More options</summary>
 			<div class="field">
-				<label for="speed">Speed <output id="speedOut">1×</output></label>
-				<input type="range" id="speed" min="0" max="8" value="2">
-			</div>
-			<div class="field">
 				<label for="seed">Seed <button id="dice" type="button" class="link" title="Random seed">Shuffle</button></label>
 				<input type="number" id="seed" value="1234">
 			</div>
 			<label class="check"><input type="checkbox" id="hand" checked> Show the brush and drops</label>
+			<label class="check"><input type="checkbox" id="splashes"> Drops and splashes (otherwise the brush paints those marks)</label>
 			<label class="check"><input type="checkbox" id="compare"> Show the reference beside it</label>
 		</details>
 

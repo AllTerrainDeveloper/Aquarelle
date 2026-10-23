@@ -39,6 +39,7 @@ export class AnimationController {
 
 	load( { analysis, plan, model, splash, drying, animator } ) {
 		this.animator = animator;
+		animator.cinematic = 'cinematic' === this.mode;
 		this.an = analysis;
 		this.plan = plan;
 		this.model = model;
@@ -56,6 +57,7 @@ export class AnimationController {
 		this.target = 0;
 		this.cursor = 0;
 		this.deferred = [];
+		this.ready = [];
 		this.executed = 0;
 		this.skipped = 0;
 		this.corrections = { paint: 0, lift: 0, skip: 0 };
@@ -74,6 +76,12 @@ export class AnimationController {
 		this.layerExec0 = 0;
 		this.layerCount = 0;
 		this.dryingWait = false;
+		this.round = 0;
+		this.converged = false;
+		this.areas = null;
+		this.lastArea = null;
+		this.waitEval = null;
+		this.evalCount = this.evalCount || 0;
 		this.epoch = ( this.epoch || 0 ) + 1;
 		this.layerName = 'Reading the values';
 		this.model.setLayer( null );
@@ -117,14 +125,26 @@ export class AnimationController {
 	 * - 'realtime': the painter's own pace, 1x with every animation; nothing
 	 *   is trimmed and nothing waits (each layer starts as soon as the last
 	 *   one is done); the duration does not apply.
+	 * - 'cinematic': Real time, filmed: the camera follows the brush, which
+	 *   goes to the water jar and the palette between colours (see Director).
 	 * In 'quick' the simulation and every gesture speed up together, so the
 	 * drops, splashes and strokes all still show.
+	 * Endless (quick or realtime): after the layers, keep refining in rounds
+	 * against the paper as it is, each stricter than the last, until rounds
+	 * find nothing left to improve.
 	 */
-	setMode( mode, quickSeconds = 20 ) {
+	setMode( mode, quickSeconds = 20, endless = false ) {
 		this.mode = mode;
 		this.timelapse = 'quick' === mode ? quickSeconds : 0;
 		// Open-ended: no time budget and no schedule, only the work.
 		this.openEnded = 'paint' !== mode;
+		this.endless = endless && this.openEnded;
+		this.animator && ( this.animator.cinematic = 'cinematic' === mode );
+	}
+
+	/** At the painter's own pace (Real time and Cinematic). */
+	get realtime() {
+		return 'realtime' === this.mode || 'cinematic' === this.mode;
 	}
 
 	/** Painting seconds per real second. */
@@ -132,16 +152,96 @@ export class AnimationController {
 		if ( 'quick' === this.mode && this.duration ) {
 			return this.duration / this.timelapse;
 		}
-		if ( 'realtime' === this.mode ) {
+		if ( this.realtime ) {
 			// Waiting only for paint to dry: fast-forward until there is work.
 			return this.dryingWait ? DRY_FAST : 1;
 		}
 		return this.speed;
 	}
 
+	/**
+	 * Endless: the next area (of a 4x4 grid) to refine, or null when all are
+	 * finished. Worst first by mean error in the latest evaluation, but the
+	 * painter never stays on one area: not the same one twice in a row,
+	 * recent visits lower an area's priority, and an area that three visits
+	 * in a row barely improved is set aside for a while.
+	 */
+	_worstArea() {
+		const G = 4;
+		const { W, H } = this.model;
+		const f = this.errorField;
+		if ( ! this.areas ) {
+			this.areas = [];
+			for ( let row = 0; row < G; row++ ) {
+				for ( let col = 0; col < G; col++ ) {
+					this.areas.push( {
+						col,
+						row,
+						visits: 0,
+						empty: 0,
+						done: false,
+						region: { x0: Math.floor( ( col * W ) / G ), x1: Math.floor( ( ( col + 1 ) * W ) / G ) - 1, y0: Math.floor( ( row * H ) / G ), y1: Math.floor( ( ( row + 1 ) * H ) / G ) - 1 },
+					} );
+				}
+			}
+		}
+		let best = null;
+		let bestErr = -1;
+		const meanErr = ( a ) => {
+			const bx0 = Math.floor( ( a.col * f.EW ) / G );
+			const bx1 = Math.max( bx0 + 1, Math.floor( ( ( a.col + 1 ) * f.EW ) / G ) );
+			const by0 = Math.floor( ( a.row * f.EH ) / G );
+			const by1 = Math.max( by0 + 1, Math.floor( ( ( a.row + 1 ) * f.EH ) / G ) );
+			let sum = 0;
+			let n = 0;
+			for ( let by = by0; by < by1; by++ ) {
+				for ( let bx = bx0; bx < bx1; bx++ ) {
+					sum += ( f.de || f.err )[ by * f.EW + bx ];
+					n++;
+				}
+			}
+			return n ? sum / n : 0;
+		};
+		// How the last visited area did: barely better three times running
+		// sets it aside for a while.
+		const last = this.lastArea;
+		if ( last && undefined !== last.errBefore ) {
+			const now = meanErr( last );
+			last.stalls = now > last.errBefore * 0.98 ? ( last.stalls || 0 ) + 1 : 0;
+			if ( now > last.errBefore * 1.02 ) {
+				// The visit made it worse: leave it alone for a good while.
+				last.restUntil = this.round + 10;
+				last.stalls = 0;
+			} else if ( last.stalls >= 3 ) {
+				last.restUntil = this.round + 6;
+				last.stalls = 0;
+			}
+		}
+		const open = this.areas.filter( ( a ) => ! a.done );
+		const rested = open.filter( ( a ) => ! ( a.restUntil > this.round ) && a !== last );
+		// If everything else is resting, the last area may go again.
+		const pool = rested.length ? rested : open.filter( ( a ) => a !== last ).length ? open.filter( ( a ) => a !== last ) : open;
+		for ( const a of pool ) {
+			const recent = this.round - ( a.lastRound ?? -99 );
+			const fatigue = 1 + 1.5 * Math.exp( -recent / 3 );
+			const e = meanErr( a ) / fatigue;
+			if ( e > bestErr ) {
+				bestErr = e;
+				best = a;
+			}
+		}
+		if ( best ) {
+			best.errBefore = meanErr( best );
+			best.lastRound = this.round;
+			this.lastArea = best;
+		}
+		return best;
+	}
+
 	/** Feed a new error map from the evaluator. */
 	setError( res ) {
 		this.evalPending = false;
+		this.evalCount = ( this.evalCount || 0 ) + 1;
 		this.lastScores = res.scores;
 		const { err, signed, EW, EH } = res;
 		// Damp regions that are still wet: wait for them to settle first.
@@ -165,7 +265,7 @@ export class AnimationController {
 				cdf[ b ] = acc;
 			}
 		}
-		this.errorField = { err, signed, weight, cdf, total: acc, EW, EH, used: new Float32Array( EW * EH ).fill( 1 ) };
+		this.errorField = { err, de: res.de, signed, weight, cdf, total: acc, EW, EH, used: new Float32Array( EW * EH ).fill( 1 ) };
 		this.renderer.uploadError( res.errU8, EW, EH );
 	}
 
@@ -295,6 +395,59 @@ export class AnimationController {
 		};
 	}
 
+	/**
+	 * A mark whose time has come. Open-ended modes do not paint it at once:
+	 * it joins a small pool the painter picks from as the hand frees up (see
+	 * _paintFromPool), so the brush works its way across the sheet instead of
+	 * hopping to wherever the next mark happens to be due.
+	 */
+	_dispatch( op ) {
+		if ( this.openEnded && this.splash.animator ) {
+			this.ready.push( op );
+		} else {
+			this._execute( op );
+		}
+	}
+
+	/**
+	 * Paints marks from the pool while the hand is nearly free: among those
+	 * planned for the next moment (so layers and big-to-small still hold),
+	 * the one in the colour on the brush and nearest to where the last stroke
+	 * ended.
+	 */
+	_paintFromPool( budget ) {
+		const anim = this.animator;
+		const B = this.an.B;
+		const window = 1.5 * Math.max( 1, this.rate );
+		let n = 0;
+		while ( this.ready.length && n < budget && anim.backlog( anim.clock ) < 0.8 ) {
+			let t0 = Infinity;
+			for ( const op of this.ready ) {
+				t0 = Math.min( t0, op.t );
+			}
+			const hx = anim.lastEnd ? anim.lastEnd.x : this.splash.handX;
+			const hy = anim.lastEnd ? anim.lastEnd.y : this.splash.handY;
+			let best = 0;
+			let bs = Infinity;
+			this.ready.forEach( ( op, j ) => {
+				if ( op.t > t0 + window ) {
+					return;
+				}
+				const x = 'number' === typeof op.x ? op.x : op.path ? op.path[ 0 ] : hx;
+				const y = 'number' === typeof op.y ? op.y : op.path ? op.path[ 1 ] : hy;
+				// Changing colour costs about a trip across the sheet.
+				const score = Math.hypot( x - hx, y - hy ) + ( undefined !== op.k && op.k !== anim.brushK ? B * 0.6 : 0 );
+				if ( score < bs ) {
+					bs = score;
+					best = j;
+				}
+			} );
+			this._execute( this.ready.splice( best, 1 )[ 0 ] );
+			n++;
+		}
+		return n;
+	}
+
 	_execute( op ) {
 		let concrete = op;
 		if ( 'correct' === op.type ) {
@@ -349,21 +502,49 @@ export class AnimationController {
 	 */
 	_maybeNextLayer() {
 		const layers = this.plan.layers;
-		if ( ! layers || this.layerPending || this.layerIdx >= layers.length ) {
+		if ( ! layers || this.layerPending ) {
 			return;
 		}
-		const L = layers[ this.layerIdx ];
+		let idx = this.layerIdx;
+		const refine = idx >= layers.length;
+		if ( refine && ( ! this.endless || this.converged ) ) {
+			return;
+		}
 		const handFree = this.animator.brushFreeAt - this.animator.clock < 0.5;
 		// Open-ended modes start a layer as soon as the last one is done.
-		if ( ( ! this.openEnded && this.simTime < L.t0 * this.duration ) || this.deferred.length || ! handFree ) {
+		const due = refine || this.openEnded || this.simTime >= layers[ idx ].t0 * this.duration;
+		if ( ! due || this.deferred.length || this.ready.length || ! handFree ) {
 			return;
 		}
+		// Endless: after the layers, refinement rounds go to the area of the
+		// picture that looks least like the image, judged on a fresh score
+		// taken after the last round, alternating a details pass (lift what is
+		// too dark, dab what is missing) with a fill pass (bare or pale).
+		let area = null;
+		if ( refine ) {
+			if ( null === this.waitEval ) {
+				this.waitEval = this.evalCount + ( this.evalPending ? 1 : 0 );
+			}
+			if ( ! this.errorField || this.evalCount <= this.waitEval ) {
+				this.lastEvalReal = -Infinity; // evaluate now
+				return;
+			}
+			this.waitEval = null;
+			area = this._worstArea();
+			if ( ! area ) {
+				this.converged = true;
+				return;
+			}
+			// Mostly the fill pass (gaps, pale or too dark, by the error map);
+			// every third visit the details pass.
+			idx = 2 === area.visits % 3 ? 3 : 4;
+		}
+		const L = layers[ idx ];
 		this.layerPending = true;
-		const idx = this.layerIdx;
 		const cur = this.model.snapshotPigment();
 		const epoch = this.epoch = ( this.epoch || 0 ) + 1;
 		// Open-ended modes plan without time limits: they paint everything.
-		this.planLayer( { layer: idx, cur: cur.buffer, handX: this.splash.handX, handY: this.splash.handY, seed: idx, unlimited: !! this.openEnded }, [ cur.buffer ] ).then( ( res ) => {
+		this.planLayer( { layer: idx, cur: cur.buffer, handX: this.splash.handX, handY: this.splash.handY, seed: refine ? 100 + this.round : idx, loaded: this.splash.loaded, unlimited: !! this.openEnded, round: area ? area.visits + 1 : 0, region: area ? area.region : null, signed: area ? this.errorField.signed.slice() : null, EW: this.errorField?.EW, EH: this.errorField?.EH }, [ cur.buffer ] ).then( ( res ) => {
 			if ( epoch !== this.epoch ) {
 				return; // restarted meanwhile
 			}
@@ -395,6 +576,23 @@ export class AnimationController {
 				op.stage = idx;
 				this.deferred.push( op );
 			}
+			if ( refine ) {
+				this.round++;
+				area.visits++;
+				this.layerName = `Refining the weakest area (${ area.col + 1 }, ${ area.row + 1 }), round ${ this.round }`;
+				// An area visited enough whose last two visits found nothing to
+				// do is finished; when all are, the painting has converged.
+				area.empty = res.ops.length ? 0 : area.empty + 1;
+				if ( area.empty >= 2 && area.visits >= 4 ) {
+					area.done = true;
+				}
+				if ( this.areas.every( ( a ) => a.done ) ) {
+					this.converged = true;
+				}
+				this.layerPending = false;
+				this.layerOps = ( this.layerOps || 0 ) + res.ops.length;
+				return;
+			}
 			this.layerName = L.name;
 			this.layerIdx = idx + 1;
 			// For progress in open-ended modes.
@@ -423,7 +621,7 @@ export class AnimationController {
 			// Backpressure: with too many gestures in flight, let the timeline wait.
 			const saturated = this.animator.actions.length > q.maxGestures;
 			while ( ! saturated && this.cursor < ops.length && ops[ this.cursor ].t <= this.simTime && opsThisFrame < q.maxOps ) {
-				this._execute( ops[ this.cursor++ ] );
+				this._dispatch( ops[ this.cursor++ ] );
 				opsThisFrame++;
 			}
 			if ( this.deferred.length && opsThisFrame < q.maxOps ) {
@@ -434,10 +632,11 @@ export class AnimationController {
 						this.deferred.push( o );
 						continue;
 					}
-					this._execute( o );
+					this._dispatch( o );
 					opsThisFrame++;
 				}
 			}
+			opsThisFrame += this._paintFromPool( q.maxOps - opsThisFrame );
 			const tb = performance.now();
 			opMs += tb - ta;
 			if ( this.cursor < ops.length && ops[ this.cursor ].t <= this.simTime && ( saturated || opsThisFrame >= q.maxOps ) ) {
@@ -491,19 +690,19 @@ export class AnimationController {
 			// Nothing in the painter's hands and nothing being planned, only
 			// strokes waiting for wet paint (or the final drying): in Real time
 			// that wait is fast-forwarded.
-			this.dryingWait = 'realtime' === this.mode && ! this.animator.busy && ! this.layerPending && ( this.finishing || this.deferred.some( ( o ) => o.defers > 0 ) );
+			this.dryingWait = this.realtime && ! this.animator.busy && ! this.layerPending && ( this.finishing || this.deferred.some( ( o ) => o.defers > 0 ) );
 			// In a time-lapse the gestures speed up with everything else.
 			const rate = this.rate;
 			const lapse = 'quick' === this.mode ? rate : 1;
 			this.animator.tick( dtReal * lapse );
 			// The hand never hurries: while brushwork is backed up, the timeline
 			// waits; it also waits while the painter steps back to plan a layer.
-			const handBusy = this.animator.brushFreeAt - this.animator.clock > 2.5 * lapse;
+			const handBusy = this.animator.backlog( this.animator.clock ) > 2.5 * lapse;
 			const dtPaint = handBusy || this.layerPending ? 0 : dtReal * rate;
 			// Open-ended modes have no end time: they end when the work is done.
 			const atEnd = this.openEnded || this.simTime >= this.duration - BASE_DT * this.adaptive.dtScale;
-			const layersDone = ! this.plan.layers || ( this.layerIdx >= this.plan.layers.length && ! this.layerPending );
-			const planDone = this.cursor >= this.plan.ops.length && 0 === this.deferred.length && ! this.animator.busy && layersDone;
+			const layersDone = ! this.plan.layers || ( this.layerIdx >= this.plan.layers.length && ! this.layerPending && ( ! this.endless || this.converged ) );
+			const planDone = this.cursor >= this.plan.ops.length && 0 === this.deferred.length && 0 === this.ready.length && ! this.animator.busy && layersDone;
 			if ( atEnd && planDone ) {
 				this.finishing = true;
 			}
@@ -527,7 +726,10 @@ export class AnimationController {
 		if ( this.renderer.needsDraw ) {
 			this.renderer.draw();
 		}
-		if ( this.overlay ) {
+		if ( this.director && this.director.active ) {
+			// Cinematic: the camera, the desk and the brush.
+			this.director.frame( dtMs / 1000, this.animator.clock );
+		} else if ( this.overlay ) {
 			const c = this.overlay.canvas;
 			this.animator.draw( this.overlay, this.animator.clock, c.width / this.model.W, c.height / this.model.H, c.width / ( c.clientWidth || c.width ) );
 		}
@@ -545,6 +747,10 @@ export class AnimationController {
 			const n = this.plan.layers.length;
 			const frac = this.layerCount ? Math.min( 1, ( this.executed - ( this.layerExec0 || 0 ) ) / this.layerCount ) : 0;
 			u = Math.min( 1, ( Math.max( 0, this.layerIdx - 1 ) + frac ) / n );
+			if ( this.endless ) {
+				// Layers fill most of the bar; refinement creeps toward the end.
+				u = this.round ? 0.8 + 0.2 * ( 1 - Math.exp( -this.round / 5 ) ) : u * 0.8;
+			}
 		}
 		const stage = 'done' === this.state ? STAGES.length - 1 : stageAt( u );
 		const layered = !! this.plan.layers;
@@ -554,7 +760,8 @@ export class AnimationController {
 			// Open-ended modes have no set duration.
 			duration: this.openEnded ? 0 : this.duration,
 			progress: 'done' === this.state ? 1 : u * 0.995,
-			stage: layered ? ( 'done' === this.state ? 'Finished' : this.finishing ? 'Drying' : this.layerName ) : STAGES[ stage ].name,
+			stage: layered ? ( 'done' === this.state ? ( this.converged ? `Finished: nothing left to improve after ${ this.round } rounds` : 'Finished' ) : this.finishing ? 'Drying' : this.layerName ) : STAGES[ stage ].name,
+			endless: !! this.endless,
 			fps: this.adaptive.fps,
 			level: this.adaptive.level,
 			dtScale: this.adaptive.dtScale,

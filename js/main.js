@@ -13,6 +13,7 @@ import { AnimationController } from './animation-controller.js';
 import { ExportManager } from './export-manager.js';
 import { SAMPLES, makeSample } from './samples.js';
 import { GestureAnimator } from './gesture-animator.js';
+import { Director } from './cinematic.js';
 
 const $ = ( id ) => document.getElementById( id );
 const SPEEDS = [ 0.25, 0.5, 1, 2, 4, 8, 16, 32, 64 ];
@@ -81,6 +82,9 @@ const animation = new AnimationController( {
 	onStats: updateHud,
 	onDone: handleDone,
 } );
+// Cinematic: the camera, the desk and the strand brush.
+const director = new Director( { stage: $( 'canvases' ), figure: document.querySelector( '.canvases .paint' ), overlay: $( 'overlay' ), renderer } );
+animation.director = director;
 
 adaptive.onLevelChange = () => {
 	if ( session ) {
@@ -143,7 +147,8 @@ function paperAtSim( W, H ) {
 /* Layout -------------------------------------------------------------------- */
 function layout() {
 	const box = $( 'canvases' ).getBoundingClientRect();
-	const compare = $( 'compare' ).checked && source;
+	const cine = director.active && session;
+	const compare = $( 'compare' ).checked && source && ! cine;
 	const narrow = window.innerWidth <= 860;
 	const [ sw, sh ] = source ? srcSize( source ) : [ 4, 3 ];
 	const aspect = sw / sh;
@@ -162,19 +167,35 @@ function layout() {
 		h = availH;
 		w = h * aspect;
 	}
+	if ( cine ) {
+		// The sheet with the desk around it (jar, palette) fits the stage.
+		const L = director.layout;
+		const b = L.bounds;
+		const scss = Math.min( box.width / ( b.x1 - b.x0 ), box.height / ( b.y1 - b.y0 ) );
+		w = L.Wn * scss;
+		h = L.Hn * scss;
+	}
 	w = Math.max( 50, Math.floor( w ) );
 	h = Math.max( 50, Math.floor( h ) );
+	// Cinematic: the sheet canvas and the overlay cover the whole stage; the
+	// camera is applied as they draw.
+	const ow = cine ? Math.floor( box.width ) : w;
+	const oh = cine ? Math.floor( box.height ) : h;
 	for ( const id of [ 'paint', 'refCanvas', 'overlay' ] ) {
-		$( id ).style.width = w + 'px';
-		$( id ).style.height = h + 'px';
+		$( id ).style.width = ( 'refCanvas' === id ? w : ow ) + 'px';
+		$( id ).style.height = ( 'refCanvas' === id ? h : oh ) + 'px';
 	}
-	const dpr = Math.min( 2, window.devicePixelRatio || 1 ) * adaptive.q.renderScale;
-	renderer.resize( Math.round( w * dpr ), Math.round( h * dpr ) );
+	// Cinematic is a close-up: never rendered below the screen's resolution.
+	const dpr = Math.min( 2, window.devicePixelRatio || 1 ) * ( cine ? Math.max( 1, adaptive.q.renderScale ) : adaptive.q.renderScale );
+	renderer.resize( Math.round( ow * dpr ), Math.round( oh * dpr ) );
 	const ov = $( 'overlay' );
 	const od = Math.min( 2, window.devicePixelRatio || 1 );
-	if ( ov.width !== Math.round( w * od ) || ov.height !== Math.round( h * od ) ) {
-		ov.width = Math.round( w * od );
-		ov.height = Math.round( h * od );
+	if ( ov.width !== Math.round( ow * od ) || ov.height !== Math.round( oh * od ) ) {
+		ov.width = Math.round( ow * od );
+		ov.height = Math.round( oh * od );
+	}
+	if ( cine ) {
+		director.setScale( w / director.layout.Wn );
 	}
 	$( 'refFig' ).hidden = ! compare;
 	if ( compare ) {
@@ -255,7 +276,7 @@ async function analyze() {
 	if ( animation.state !== 'idle' ) {
 		animation.state = 'idle';
 	}
-	for ( const id of [ 'start', 'quick', 'realtime', 'restart', 'exportPng', 'record' ] ) {
+	for ( const id of [ 'start', 'restart', 'exportPng', 'record' ] ) {
 		$( id ).disabled = true;
 	}
 	animation.setMode( 'paint' );
@@ -301,6 +322,7 @@ async function analyze() {
 	const drying = new DryingModel( duration );
 	const splash = new SplashGenerator( model, an, drying );
 	splash.complexity = adaptive.q.complexity;
+	splash.noSplashes = ! $( 'splashes' ).checked;
 	const animator = new GestureAnimator( model, an.pigments );
 	animator.showGestures = $( 'hand' ).checked;
 	// ?instant=1 (QA): deposits apply immediately without the animated hand.
@@ -311,6 +333,8 @@ async function analyze() {
 	finalScores = null;
 	animation.load( { analysis: an, plan: r.plan, model, splash, drying, animator } );
 	animation.setError( r.baseline );
+	director.setup( session );
+	syncCinematic();
 	layout();
 
 	// Palette: click a colour to take it off (the painter mixes that area from
@@ -424,7 +448,7 @@ async function analyze() {
 		`Analysis ${ Math.round( r.timings.analysis ) } ms, planning ${ Math.round( r.timings.plan ) } ms in a worker. ` +
 		`Palette fidelity ΔE ${ an.stats.paletteDE.toFixed( 1 ) }; blank-paper similarity ${ r.baseline.scores.similarity.toFixed( 1 ) }.`;
 	$( 'time' ).textContent = `0:00 / ${ fmt( duration ) }`;
-	for ( const id of [ 'start', 'quick', 'realtime', 'restart', 'exportPng' ] ) {
+	for ( const id of [ 'start', 'restart', 'exportPng' ] ) {
 		$( id ).disabled = false;
 	}
 	$( 'record' ).disabled = ! exporter.canRecord();
@@ -470,34 +494,104 @@ function setPlayLabel() {
 	$( 'start' ).textContent = 'painting' === st ? 'Pause' : 'paused' === st ? 'Resume' : 'done' === st ? 'Paint again' : 'Paint';
 }
 
+/* Painting modes (tabs) ------------------------------------------------------------- */
+const MODE_HINTS = {
+	quick: 'The whole painting, time-lapsed: about 20 seconds, longer if it needs it to finish everything.',
+	endless: 'Paints, then keeps refining the areas that look least like the image, until nothing is left to improve.',
+	realtime: "At the painter's own pace, with every animation. Paints everything; waits for drying are fast-forwarded.",
+	custom: 'Fits the painting into the time you choose, at the playback speed you choose.',
+	cinematic: 'Real time, filmed up close: the camera follows the brush as it paints, rinses in the jar and loads up at the palette.',
+};
+let tab = 'quick';
+try {
+	tab = MODE_HINTS[ localStorage.getItem( 'aquarelle-tab' ) ] ? localStorage.getItem( 'aquarelle-tab' ) : tab;
+} catch ( err ) {}
+
+function selectTab( name, focus ) {
+	tab = name;
+	for ( const b of document.querySelectorAll( '.tabs [role="tab"]' ) ) {
+		const on = b.dataset.mode === name;
+		b.setAttribute( 'aria-selected', String( on ) );
+		b.tabIndex = on ? 0 : -1;
+		if ( on ) {
+			$( 'modePanel' ).setAttribute( 'aria-labelledby', b.id );
+			if ( focus ) {
+				b.focus();
+			}
+		}
+	}
+	$( 'modeHint' ).textContent = MODE_HINTS[ name ];
+	$( 'endlessOpts' ).hidden = 'endless' !== name;
+	$( 'customOpts' ).hidden = 'custom' !== name;
+	try {
+		localStorage.setItem( 'aquarelle-tab', name );
+	} catch ( err ) {}
+	syncCinematic();
+}
+
 /**
- * Start painting in a mode: 'paint' (fits the duration), 'quick' (Quick
- * draw: time-lapsed, about QUICK_SECONDS, until everything is painted) or
- * 'realtime' (the painter's own pace, until everything is painted). The
- * Paint button pauses and resumes whichever is running.
+ * The stage is filmed (Cinematic) while a Cinematic painting is on it, or
+ * before painting when that tab is selected.
  */
-function play( mode ) {
+function syncCinematic() {
+	const fresh = ! session || 'ready' === animation.state || 'idle' === animation.state;
+	const on = !! session && ( fresh ? 'cinematic' === tab : 'cinematic' === animation.mode );
+	if ( on !== director.active ) {
+		director.enable( on );
+		layout();
+	}
+}
+const tabButtons = [ ...document.querySelectorAll( '.tabs [role="tab"]' ) ];
+for ( const b of tabButtons ) {
+	b.addEventListener( 'click', () => selectTab( b.dataset.mode ) );
+	b.addEventListener( 'keydown', ( e ) => {
+		const step = { ArrowRight: 1, ArrowLeft: -1 }[ e.key ];
+		if ( step ) {
+			e.preventDefault();
+			const j = ( tabButtons.indexOf( b ) + step + tabButtons.length ) % tabButtons.length;
+			selectTab( tabButtons[ j ].dataset.mode, true );
+		}
+	} );
+}
+selectTab( tab );
+
+/** The selected tab as a controller mode and the Endless flag. */
+function tabMode() {
+	if ( 'endless' === tab ) {
+		const pace = document.querySelector( 'input[name="pace"]:checked' );
+		return { mode: pace ? pace.value : 'quick', endless: true };
+	}
+	return { mode: 'custom' === tab ? 'paint' : tab, endless: false };
+}
+
+/**
+ * The Paint button: pauses and resumes a painting in progress; otherwise
+ * starts the selected tab's mode (fresh if the mode changed).
+ */
+function play() {
 	if ( ! session ) {
 		return;
 	}
 	const st = animation.state;
-	if ( 'paint' === mode && 'painting' === st ) {
+	const { mode, endless } = tabMode();
+	const same = mode === animation.mode && endless === animation.endless;
+	if ( 'painting' === st ) {
 		animation.pause();
-	} else if ( 'paint' === mode && 'paused' === st ) {
+	} else if ( 'paused' === st && same ) {
 		animation.resume();
 	} else {
-		if ( 'ready' !== st || mode !== animation.mode ) {
+		if ( 'ready' !== st || ! same ) {
 			restart();
 		}
-		animation.setMode( mode, QUICK_SECONDS );
+		animation.setMode( mode, QUICK_SECONDS, endless );
+		syncCinematic();
+		director.reset();
 		animation.start();
 		setStatus( '' );
 	}
 	setPlayLabel();
 }
-$( 'start' ).addEventListener( 'click', () => play( 'paint' ) );
-$( 'quick' ).addEventListener( 'click', () => play( 'quick' ) );
-$( 'realtime' ).addEventListener( 'click', () => play( 'realtime' ) );
+$( 'start' ).addEventListener( 'click', play );
 
 function restart() {
 	animation.reset();
@@ -527,6 +621,7 @@ function setSpeedIndex( i ) {
 $( 'speed' ).addEventListener( 'input', ( e ) => setSpeedIndex( Number( e.target.value ) ) );
 $( 'view' ).addEventListener( 'change', ( e ) => renderer.setView( Number( e.target.value ) ) );
 $( 'compare' ).addEventListener( 'change', layout );
+$( 'splashes' ).addEventListener( 'change', ( e ) => session && ( session.splash.noSplashes = ! e.target.checked ) );
 $( 'hand' ).addEventListener( 'change', ( e ) => session && ( session.animator.showGestures = e.target.checked ) );
 document.addEventListener( 'keydown', ( e ) => {
 	if ( ' ' === e.key && e.target === document.body ) {
@@ -572,16 +667,18 @@ $( 'exportPng' ).addEventListener( 'click', async () => {
 $( 'record' ).addEventListener( 'click', async () => {
 	if ( exporter.recorder ) {
 		await exporter.stopRecording( `aquarelle-${ sourceName }` );
+		director.stopRecording();
 		$( 'record' ).textContent = 'Record video';
 	} else {
-		exporter.startRecording( $( 'paint' ) );
+		// Cinematic records what the camera sees.
+		exporter.startRecording( director.active ? director.startRecording( $( 'paint' ) ) : $( 'paint' ) );
 		$( 'record' ).textContent = 'Stop & save video';
 	}
 } );
 
 /* HUD ---------------------------------------------------------------------------------- */
 function updateHud( s ) {
-	const label = { ready: 'Ready', painting: s.stage, paused: 'Paused — ' + s.stage, done: 'Finished', idle: 'Ready' }[ s.state ] || s.stage;
+	const label = { ready: 'Ready', painting: s.stage, paused: 'Paused — ' + s.stage, done: s.endless ? s.stage : 'Finished', idle: 'Ready' }[ s.state ] || s.stage;
 	$( 'stageName' ).textContent = label;
 	// Waiting for paint to dry is fast-forwarded in Real time: say so.
 	$( 'dryFast' ).hidden = ! s.dryingFast;
@@ -592,12 +689,14 @@ function updateHud( s ) {
 	$( 'time' ).textContent = s.duration ? `${ fmt( s.simTime ) } / ${ fmt( s.duration ) }` : fmt( s.simTime );
 	$( 'bar' ).style.width = s.progress * 100 + '%';
 	setPlayLabel();
+	// Endless is about the likeness improving: its score is always shown.
+	const sc = finalScores || s.scores;
+	$( 'sim' ).hidden = ! DEV && ! s.endless;
+	$( 'sim' ).textContent = sc ? `similarity ${ sc.similarity.toFixed( 1 ) }` : 'similarity —';
 	if ( ! DEV ) {
 		return;
 	}
 	$( 'fps' ).textContent = `${ Math.round( s.fps ) } fps`;
-	const sc = finalScores || s.scores;
-	$( 'sim' ).textContent = sc ? `similarity ${ sc.similarity.toFixed( 1 ) }` : 'similarity —';
 	const e = s.ema;
 	const rows = [
 		[ 'Operations', `${ s.executed } done · ${ s.cursor }/${ s.total } scheduled` ],
