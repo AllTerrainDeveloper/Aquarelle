@@ -79,22 +79,45 @@ export class AnimationController {
 		}
 		this.state = 'painting';
 		this.startedAt = performance.now();
+		this.pausedMs = 0;
 	}
 
 	pause() {
 		if ( 'painting' === this.state ) {
 			this.state = 'paused';
+			this.pausedAt = performance.now();
 		}
 	}
 
 	resume() {
 		if ( 'paused' === this.state ) {
 			this.state = 'painting';
+			this.pausedMs = ( this.pausedMs || 0 ) + performance.now() - this.pausedAt;
 		}
 	}
 
 	setSpeed( s ) {
 		this.speed = s;
+	}
+
+	/**
+	 * Time-lapse: play the whole painting in about `seconds` of real time
+	 * (0 turns it off). Everything runs faster together, the simulation and
+	 * every gesture, so the drops, splashes and strokes all still show.
+	 */
+	setTimelapse( seconds ) {
+		this.timelapse = seconds;
+	}
+
+	/** Painting seconds per real second. */
+	get rate() {
+		if ( this.timelapse && this.duration ) {
+			// Aim at the end: catch up if layer planning or the hand held it back.
+			const left = this.timelapse - ( performance.now() - this.startedAt - ( this.pausedMs || 0 ) ) / 1000;
+			const base = this.duration / this.timelapse;
+			return Math.min( base * 3, Math.max( base, ( this.duration - this.simTime ) / Math.max( 1, left ) ) );
+		}
+		return this.speed;
 	}
 
 	/** Feed a new error map from the evaluator. */
@@ -393,15 +416,16 @@ export class AnimationController {
 		this.adaptive.record( 'ops', opMs );
 		this.adaptive.record( 'sim', simMs );
 		const lag = this.target - this.simTime;
-		this.adaptive.reportLag( lag / Math.max( 1, this.speed ) );
+		const rate = Math.max( 1, this.rate );
+		this.adaptive.reportLag( lag / rate );
 		// Never accumulate unbounded debt on slow devices.
-		if ( lag > 3 * Math.max( 1, this.speed ) ) {
-			this.target = this.simTime + 3 * Math.max( 1, this.speed );
+		if ( lag > 3 * rate ) {
+			this.target = this.simTime + 3 * rate;
 		}
 	}
 
 	_maybeEvaluate( now ) {
-		if ( this.evalPending || now - this.lastEvalReal < this.adaptive.q.evalInterval / Math.max( 1, Math.sqrt( this.speed ) ) ) {
+		if ( this.evalPending || now - this.lastEvalReal < this.adaptive.q.evalInterval / Math.max( 1, Math.sqrt( this.rate ) ) ) {
 			return;
 		}
 		const t = performance.now();
@@ -424,11 +448,14 @@ export class AnimationController {
 		const frameStart = performance.now();
 		if ( painting ) {
 			const dtReal = Math.min( dtMs, 100 ) / 1000;
-			this.animator.tick( dtReal );
+			// In a time-lapse the gestures speed up with everything else.
+			const rate = this.rate;
+			const lapse = this.timelapse ? rate : 1;
+			this.animator.tick( dtReal * lapse );
 			// The hand never hurries: while brushwork is backed up, the timeline
 			// waits; it also waits while the painter steps back to plan a layer.
-			const handBusy = this.animator.brushFreeAt - this.animator.clock > 2.5;
-			const dtPaint = handBusy || this.layerPending ? 0 : dtReal * this.speed;
+			const handBusy = this.animator.brushFreeAt - this.animator.clock > 2.5 * lapse;
+			const dtPaint = handBusy || this.layerPending ? 0 : dtReal * rate;
 			const atEnd = this.simTime >= this.duration - BASE_DT * this.adaptive.dtScale;
 			const layersDone = ! this.plan.layers || ( this.layerIdx >= this.plan.layers.length && ! this.layerPending );
 			const planDone = this.cursor >= this.plan.ops.length && 0 === this.deferred.length && ! this.animator.busy && layersDone;

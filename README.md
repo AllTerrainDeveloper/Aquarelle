@@ -14,6 +14,12 @@ Static site, no build step and no dependencies: serve the folder and open
 python3 -m http.server 8765
 ```
 
+**Controls:** pick a sample or drop an image; settings (colours, detail,
+duration) apply as soon as they change. **Paint** plays the painting in
+real time over the chosen duration; **Quick draw** plays the same painting,
+every drop, splash and stroke, time-lapsed into 20 seconds. Speed, seed and
+the reference view are under *More options*.
+
 **Palette editing:** after analysis, click a colour in the palette to remove
 it (the painter mixes that area from the remaining pigments), or drag a
 colour onto another to paint it as that colour (a recolour in OKLab that
@@ -21,7 +27,9 @@ keeps the image's light and shade). Click a removed or transformed colour to
 restore it.
 
 URL options: `?sample=portrait|landscape|lowcolor|detailed|contrast|lettering`
-loads a built-in test image; `?instant=1` (QA) applies paint without the
+loads a built-in test image; `?dev=1` shows the developer panel (live
+similarity and FPS, per-subsystem timings, wet-area and error views, the
+benchmark button), which is hidden otherwise; `?instant=1` (QA) applies paint without the
 animated hand; `?bench=1&benchSpeed=16&benchRt=20` runs the benchmark
 (each image is timed at 1× for `benchRt` seconds, then finished at
 `benchSpeed`×).
@@ -143,7 +151,7 @@ reference.
   brush must return to a spot that is still wet; the stroke is re-scheduled
   a moment later, never blocking the canvas (after 6 tries it paints
   wet-on-wet). The painting finishes when the last wash has dried.
-- FPS and per-subsystem times are measured live (Diagnostics panel) and by
+- FPS and per-subsystem times are measured live (developer panel, `?dev=1`) and by
   the benchmark. No number below is estimated.
 
 ## Measured results

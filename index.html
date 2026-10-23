@@ -12,55 +12,62 @@
 	<aside class="panel" aria-label="Configuration">
 		<header class="brand">
 			<h1>Aquarelle</h1>
-			<p>A procedural watercolor painter that reconstructs your image, splash by splash.</p>
 		</header>
 
 		<section class="group">
-			<h2>Reference</h2>
 			<label class="drop" id="drop">
 				<input type="file" id="file" accept="image/*" hidden>
 				<canvas id="refPreview" width="1" height="1" hidden></canvas>
-				<span id="dropHint">Drop an image here or click to upload</span>
+				<span id="dropHint">Drop an image or click to upload</span>
 			</label>
 			<div class="samples" id="samples" aria-label="Sample images"></div>
 		</section>
 
 		<section class="group">
-			<h2>Composition</h2>
+			<div id="swatches" class="swatches" aria-label="Palette: click a colour to remove it, drag it onto another to turn it into that one"></div>
+			<p class="muted small">Click a colour to remove it, or drag it onto another.</p>
 			<div class="field">
-				<label for="pigments">Pigments <output id="pigOut">8</output></label>
+				<label for="pigments">Colours <output id="pigOut">8</output></label>
 				<input type="range" id="pigments" min="3" max="16" value="8">
+			</div>
+			<div class="field">
+				<label for="detail">Detail <output id="detailOut">Balanced</output></label>
+				<input type="range" id="detail" min="0" max="4" value="1">
 			</div>
 			<div class="field">
 				<label for="duration">Duration <output id="durOut">10 min</output></label>
 				<input type="range" id="duration" min="1" max="30" step="1" value="10">
 			</div>
+		</section>
+
+		<section class="group">
+			<div class="buttons">
+				<button id="start" type="button" class="primary" disabled>Paint</button>
+				<button id="quick" type="button" disabled title="The whole painting in 20 seconds">Quick draw</button>
+				<button id="restart" type="button" disabled aria-label="Restart" title="Restart">↺</button>
+			</div>
+			<div class="buttons">
+				<button id="exportPng" type="button" disabled>Save PNG</button>
+				<button id="record" type="button" disabled>Record video</button>
+			</div>
+		</section>
+
+		<details class="group more">
+			<summary>More options</summary>
+			<div class="field">
+				<label for="speed">Speed <output id="speedOut">1×</output></label>
+				<input type="range" id="speed" min="0" max="8" value="2">
+			</div>
 			<div class="field">
 				<label for="seed">Seed <button id="dice" type="button" class="link" title="Random seed">Shuffle</button></label>
 				<input type="number" id="seed" value="1234">
 			</div>
-			<div class="field">
-				<label for="detail">Fine detail <output id="detailOut">Balanced</output></label>
-				<input type="range" id="detail" min="0" max="4" value="1">
-				<p class="muted small">Higher keeps text and small shapes legible: a finer grid and more, smaller brush strokes. Uses more CPU.</p>
-			</div>
-			<button id="analyze" type="button" class="primary" disabled>Analyze image</button>
-			<div id="swatches" class="swatches" aria-label="Palette: click a colour to remove it, drag it onto another to turn it into that one"></div>
-			<p class="muted small">Click a colour to remove it; drag it onto another to paint it as that colour.</p>
-			<p id="planInfo" class="muted small"></p>
-		</section>
+			<label class="check"><input type="checkbox" id="hand" checked> Show the brush and drops</label>
+			<label class="check"><input type="checkbox" id="compare"> Show the reference beside it</label>
+		</details>
 
-		<section class="group">
-			<h2>Painting</h2>
-			<div class="buttons">
-				<button id="start" type="button" class="primary" disabled>Start painting</button>
-				<button id="pause" type="button" disabled>Pause</button>
-				<button id="restart" type="button" disabled>Restart</button>
-			</div>
-			<div class="field">
-				<label for="speed">Playback speed <output id="speedOut">1×</output></label>
-				<input type="range" id="speed" min="0" max="8" value="2">
-			</div>
+		<section class="group" id="devPanel" hidden>
+			<h2>Diagnostics</h2>
 			<div class="field">
 				<label for="view">View</label>
 				<select id="view">
@@ -69,28 +76,9 @@
 					<option value="2">Error heatmap</option>
 				</select>
 			</div>
-			<label class="check"><input type="checkbox" id="hand" checked> Show the artist's gestures</label>
-			<label class="check"><input type="checkbox" id="compare"> Show reference side by side</label>
-		</section>
-
-		<section class="group">
-			<h2>Export</h2>
-			<div class="buttons">
-				<select id="exportScale" aria-label="Export scale">
-					<option value="2">2×</option>
-					<option value="3" selected>3×</option>
-					<option value="4">4×</option>
-				</select>
-				<button id="exportPng" type="button" disabled>Export PNG</button>
-				<button id="record" type="button" disabled>Record video</button>
-			</div>
-			<p id="exportInfo" class="muted small"></p>
-		</section>
-
-		<section class="group">
-			<h2>Diagnostics</h2>
+			<p id="planInfo" class="muted small"></p>
 			<dl id="perf" class="perf"></dl>
-			<button id="bench" type="button">Run benchmark on the 5 samples</button>
+			<button id="bench" type="button">Run benchmark on the samples</button>
 			<div id="benchOut" class="bench"></div>
 		</section>
 	</aside>
@@ -99,9 +87,8 @@
 		<div class="hud" aria-live="polite">
 			<span id="stageName" class="stage-name">Ready</span>
 			<span id="time">0:00 / 10:00</span>
-			<span id="pct">0%</span>
-			<span id="fps" class="pill">— fps</span>
-			<span id="sim" class="pill">similarity —</span>
+			<span id="fps" class="pill dev" hidden>— fps</span>
+			<span id="sim" class="pill dev" hidden>similarity —</span>
 		</div>
 		<div class="progress"><div id="bar"></div></div>
 		<div class="canvases" id="canvases">
@@ -114,7 +101,7 @@
 				<figcaption>Reference</figcaption>
 			</figure>
 		</div>
-		<p class="status" id="status">Upload an image or pick a sample to begin.</p>
+		<p class="status" id="status">Pick a sample or drop an image to begin.</p>
 	</main>
 </div>
 <script type="module" src="js/main.js"></script>

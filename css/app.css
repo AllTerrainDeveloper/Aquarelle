@@ -228,6 +228,30 @@ button.attention {
 	gap: 6px;
 }
 
+.buttons > button {
+	flex: 1 1 auto;
+}
+
+.buttons > #restart {
+	flex: 0 0 auto;
+	min-width: 38px;
+}
+
+.more summary {
+	cursor: pointer;
+	font-size: 13px;
+	color: var(--muted);
+	list-style-position: inside;
+}
+
+.more summary:hover {
+	color: inherit;
+}
+
+.more[open] summary {
+	margin-bottom: 4px;
+}
+
 .check {
 	display: flex;
 	gap: 8px;

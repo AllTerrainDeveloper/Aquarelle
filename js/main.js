@@ -18,6 +18,14 @@ const $ = ( id ) => document.getElementById( id );
 const SPEEDS = [ 0.25, 0.5, 1, 2, 4, 8, 16, 32, 64 ];
 const PAPER_SIZE = 1024;
 const params = new URLSearchParams( location.search );
+// The whole painting, time-lapsed into this many seconds.
+const QUICK_SECONDS = 20;
+// ?dev=1 shows diagnostics, the benchmark and the live similarity score.
+const DEV = params.has( 'dev' );
+if ( DEV ) {
+	$( 'devPanel' ).hidden = false;
+	document.querySelectorAll( '.hud .dev' ).forEach( ( el ) => ( el.hidden = false ) );
+}
 
 /* Worker RPC ------------------------------------------------------------ */
 const worker = new Worker( new URL( './analysis-worker.js', import.meta.url ), { type: 'module' } );
@@ -200,7 +208,6 @@ function loadSource( img, name ) {
 	pv.getContext( '2d' ).drawImage( img, 0, 0, pv.width, pv.height );
 	pv.hidden = false;
 	$( 'dropHint' ).hidden = true;
-	$( 'analyze' ).disabled = false;
 	layout();
 	return analyze();
 }
@@ -248,10 +255,10 @@ async function analyze() {
 	if ( animation.state !== 'idle' ) {
 		animation.state = 'idle';
 	}
-	for ( const id of [ 'analyze', 'start', 'pause', 'restart', 'exportPng', 'record' ] ) {
+	for ( const id of [ 'start', 'quick', 'restart', 'exportPng', 'record' ] ) {
 		$( id ).disabled = true;
 	}
-	$( 'analyze' ).classList.remove( 'attention' );
+	animation.setTimelapse( 0 );
 	const [ sw, sh ] = srcSize( source );
 	const res = simResolution();
 	const s = res / Math.max( sw, sh );
@@ -275,7 +282,7 @@ async function analyze() {
 	const seed = Number( $( 'seed' ).value ) >>> 0;
 	const minutes = Math.min( 30, Math.max( 1, Number( $( 'duration' ).value ) || 10 ) );
 	const duration = minutes * 60;
-	setStatus( `Analyzing ${ W }×${ H } in a background worker…` );
+	setStatus( 'Studying the image…' );
 	const t0 = performance.now();
 	let r;
 	try {
@@ -284,8 +291,7 @@ async function analyze() {
 			refPixels.buffer,
 		] );
 	} catch ( err ) {
-		setStatus( 'Analysis failed: ' + err.message );
-		$( 'analyze' ).disabled = false;
+		setStatus( 'Could not analyse that image: ' + err.message );
 		throw err;
 	}
 	const wall = performance.now() - t0;
@@ -418,73 +424,80 @@ async function analyze() {
 		`Analysis ${ Math.round( r.timings.analysis ) } ms, planning ${ Math.round( r.timings.plan ) } ms in a worker. ` +
 		`Palette fidelity ΔE ${ an.stats.paletteDE.toFixed( 1 ) }; blank-paper similarity ${ r.baseline.scores.similarity.toFixed( 1 ) }.`;
 	$( 'time' ).textContent = `0:00 / ${ fmt( duration ) }`;
-	for ( const id of [ 'analyze', 'start', 'restart', 'exportPng' ] ) {
+	for ( const id of [ 'start', 'quick', 'restart', 'exportPng' ] ) {
 		$( id ).disabled = false;
 	}
 	$( 'record' ).disabled = ! exporter.canRecord();
-	$( 'start' ).textContent = 'Start painting';
-	setStatus( `Ready: ${ W }×${ H } simulation grid, ${ an.pigments.filter( ( p ) => ! p.isPaper ).length } pigments. Press Start.` );
+	setPlayLabel();
+	setStatus( 'Ready.' );
 	return session;
 }
 
-$( 'analyze' ).addEventListener( 'click', analyze );
+// Settings apply as soon as they change: the image is analysed again.
+let reanalyzeTimer = 0;
+const reanalyze = () => {
+	clearTimeout( reanalyzeTimer );
+	reanalyzeTimer = setTimeout( () => session && analyze(), 150 );
+};
 $( 'pigments' ).addEventListener( 'input', ( e ) => {
 	$( 'pigOut' ).textContent = e.target.value;
+} );
+$( 'pigments' ).addEventListener( 'change', () => {
 	// A different palette size gives different colours: start with all allowed.
 	excluded.clear();
 	remap.clear();
-	if ( session ) {
-		$( 'analyze' ).classList.add( 'attention' );
-	}
+	reanalyze();
 } );
 $( 'duration' ).addEventListener( 'input', ( e ) => {
 	$( 'durOut' ).textContent = e.target.value + ' min';
 } );
 $( 'detail' ).addEventListener( 'input', ( e ) => {
 	$( 'detailOut' ).textContent = DETAIL[ Number( e.target.value ) ].name;
-	if ( session ) {
-		$( 'analyze' ).classList.add( 'attention' );
-	}
 } );
-for ( const id of [ 'duration', 'seed' ] ) {
-	$( id ).addEventListener( 'change', () => session && $( 'analyze' ).classList.add( 'attention' ) );
+for ( const id of [ 'duration', 'detail', 'seed' ] ) {
+	$( id ).addEventListener( 'change', reanalyze );
 }
 $( 'dice' ).addEventListener( 'click', () => {
 	$( 'seed' ).value = Math.floor( Math.random() * 1e6 );
-	if ( session ) {
-		$( 'analyze' ).classList.add( 'attention' );
-	}
+	reanalyze();
 } );
 
 /* Playback ------------------------------------------------------------------------ */
-$( 'start' ).addEventListener( 'click', () => {
+function setPlayLabel() {
+	const st = animation.state;
+	$( 'start' ).textContent = 'painting' === st ? 'Pause' : 'paused' === st ? 'Resume' : 'done' === st ? 'Paint again' : 'Paint';
+}
+
+/**
+ * Paint (or Quick draw: the same painting, every drop, splash and stroke,
+ * time-lapsed into QUICK_SECONDS). Pressing Paint while painting pauses.
+ */
+function play( quick ) {
 	if ( ! session ) {
 		return;
 	}
-	if ( 'done' === animation.state ) {
-		restart();
-	}
-	animation.start();
-	$( 'pause' ).disabled = false;
-	$( 'start' ).disabled = true;
-	setStatus( '' );
-} );
-
-$( 'pause' ).addEventListener( 'click', () => {
-	if ( 'painting' === animation.state ) {
+	const st = animation.state;
+	if ( ! quick && 'painting' === st ) {
 		animation.pause();
-		$( 'pause' ).textContent = 'Resume';
-	} else if ( 'paused' === animation.state ) {
+	} else if ( ! quick && 'paused' === st ) {
 		animation.resume();
-		$( 'pause' ).textContent = 'Pause';
+	} else {
+		if ( 'ready' !== st || quick !== !! animation.timelapse ) {
+			restart();
+		}
+		animation.setTimelapse( quick ? QUICK_SECONDS : 0 );
+		animation.start();
+		setStatus( '' );
 	}
-} );
+	setPlayLabel();
+}
+$( 'start' ).addEventListener( 'click', () => play( false ) );
+$( 'quick' ).addEventListener( 'click', () => play( true ) );
 
 function restart() {
 	animation.reset();
 	animation.setError( session.baseline );
 	finalScores = null;
-	$( 'pause' ).textContent = 'Pause';
 }
 
 $( 'restart' ).addEventListener( 'click', () => {
@@ -496,9 +509,9 @@ $( 'restart' ).addEventListener( 'click', () => {
 	if ( wasPainting ) {
 		animation.start();
 	} else {
-		$( 'start' ).disabled = false;
-		$( 'pause' ).disabled = true;
+		animation.setTimelapse( 0 );
 	}
+	setPlayLabel();
 } );
 
 function setSpeedIndex( i ) {
@@ -513,7 +526,7 @@ $( 'hand' ).addEventListener( 'change', ( e ) => session && ( session.animator.s
 document.addEventListener( 'keydown', ( e ) => {
 	if ( ' ' === e.key && e.target === document.body ) {
 		e.preventDefault();
-		$( 'pause' ).click();
+		$( 'start' ).click();
 	}
 } );
 
@@ -525,9 +538,14 @@ async function finalEvaluation() {
 }
 
 async function handleDone() {
-	$( 'pause' ).disabled = true;
-	$( 'start' ).disabled = false;
-	$( 'start' ).textContent = 'Paint again';
+	setPlayLabel();
+	animation.setTimelapse( 0 );
+	if ( ! DEV ) {
+		setStatus( 'Finished.' );
+		doneResolve?.();
+		doneResolve = null;
+		return;
+	}
 	try {
 		finalScores = await finalEvaluation();
 		setStatus(
@@ -543,9 +561,8 @@ async function handleDone() {
 
 /* Export ------------------------------------------------------------------------------ */
 $( 'exportPng' ).addEventListener( 'click', async () => {
-	const scale = Number( $( 'exportScale' ).value );
-	const r = await exporter.exportPNG( scale, `aquarelle-${ sourceName }-${ session.seed }.png` );
-	$( 'exportInfo' ).textContent = `Exported ${ r.w }×${ r.h } PNG (${ ( r.bytes / 1e6 ).toFixed( 1 ) } MB) — simulation grid is ${ session.W }×${ session.H }.`;
+	const r = await exporter.exportPNG( 3, `aquarelle-${ sourceName }-${ session.seed }.png` );
+	setStatus( `Saved a ${ r.w }×${ r.h } PNG.` );
 } );
 
 $( 'record' ).addEventListener( 'click', async () => {
@@ -563,8 +580,11 @@ function updateHud( s ) {
 	const label = { ready: 'Ready', painting: s.stage, paused: 'Paused — ' + s.stage, done: 'Finished', idle: 'Ready' }[ s.state ] || s.stage;
 	$( 'stageName' ).textContent = label;
 	$( 'time' ).textContent = `${ fmt( s.simTime ) } / ${ fmt( s.duration ) }`;
-	$( 'pct' ).textContent = Math.round( s.progress * 100 ) + '%';
 	$( 'bar' ).style.width = s.progress * 100 + '%';
+	setPlayLabel();
+	if ( ! DEV ) {
+		return;
+	}
 	$( 'fps' ).textContent = `${ Math.round( s.fps ) } fps`;
 	const sc = finalScores || s.scores;
 	$( 'sim' ).textContent = sc ? `similarity ${ sc.similarity.toFixed( 1 ) }` : 'similarity —';

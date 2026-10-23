@@ -474,7 +474,7 @@ export function planLayer( ctx, layer, state ) {
 			}
 		}
 		const shapes = [];
-		for ( const cells of components( mask, W, H, 5 ) ) {
+		const addShape = ( cells ) => {
 			const sums = new Float64Array( K );
 			let imp = 0;
 			for ( const i of cells ) {
@@ -498,14 +498,15 @@ export function planLayer( ctx, layer, state ) {
 			}
 			// A short touch is right for small round features (a pupil, an iris);
 			// only skip specks that are neither important nor dark.
-			const avgImp0 = imp / cells.length;
-			if ( ! strokes.length || ( len < B * 0.02 && ( cells.length < 5 || ( avgImp0 < 0.45 && sums[ k1 ] / cells.length < 0.4 ) ) ) ) {
-				continue;
+			const avgImp = imp / cells.length;
+			const avgNeed = sums[ k1 ] / cells.length;
+			if ( ! strokes.length || ( len < B * 0.02 && ( cells.length < 5 || ( avgImp < 0.45 && avgNeed < 0.4 ) ) ) ) {
+				return;
 			}
 			// Only details here: thin or small shapes. Big leftovers belong to
 			// the glazes, not to the small brush.
 			if ( rr >= B * 0.02 && cells.length > ( B * 0.06 ) ** 2 ) {
-				continue;
+				return;
 			}
 			let secs = 0;
 			for ( const st of strokes ) {
@@ -513,11 +514,61 @@ export function planLayer( ctx, layer, state ) {
 			}
 			// What a painter refines first: important, dark, detailed shapes
 			// (eyes, brows, lettering), not whatever leftover patch is biggest.
-			const avgImp = imp / cells.length;
-			const avgNeed = sums[ k1 ] / cells.length;
 			const thin = rr < B * 0.015;
 			const priority = avgNeed * avgImp * avgImp * ( thin ? 2 : 1 ) * Math.sqrt( Math.min( 1, len / ( B * 0.05 ) ) );
 			shapes.push( { k: k1, strokes, secs, mass: priority, ...centroid( cells, W ) } );
+		};
+		// A feature is often several colours side by side (an eye: lid line,
+		// iris, pupil). Each cell goes to the colour it needs most; close
+		// colours (two darks in one brow) stay one shape, distinct ones are
+		// painted as their own shapes, each with its own colour.
+		const owner = new Int16Array( N );
+		const sub = new Uint8Array( N );
+		for ( const cells of components( mask, W, H, 5 ) ) {
+			const total = new Float64Array( K );
+			for ( const i of cells ) {
+				let best = -1;
+				let bn = 0;
+				for ( let k = 0; k < K; k++ ) {
+					const n = pigments[ k ].isPaper ? 0 : need( k, i );
+					if ( n > bn ) {
+						bn = n;
+						best = k;
+					}
+				}
+				owner[ i ] = best;
+				if ( best >= 0 ) {
+					total[ best ] += bn;
+				}
+			}
+			// Families: each colour joins the strongest close colour.
+			const byMass = [ ...total.keys() ].filter( ( k ) => total[ k ] > 0 ).sort( ( x, y ) => total[ y ] - total[ x ] );
+			const family = new Int16Array( K ).fill( -1 );
+			for ( const k of byMass ) {
+				family[ k ] = k;
+				for ( const h of byMass ) {
+					if ( h === k ) {
+						break;
+					}
+					const [ l1, a1, b1 ] = pigments[ k ].lab;
+					const [ l2, a2, b2 ] = pigments[ h ].lab;
+					if ( family[ h ] === h && Math.hypot( l1 - l2, a1 - a2, b1 - b2 ) < 0.1 ) {
+						family[ k ] = h;
+						break;
+					}
+				}
+			}
+			for ( const f of byMass.filter( ( k ) => family[ k ] === k ) ) {
+				for ( const i of cells ) {
+					sub[ i ] = owner[ i ] >= 0 && family[ owner[ i ] ] === f ? 1 : 0;
+				}
+				for ( const part of components( sub, W, H, 3 ) ) {
+					addShape( part );
+				}
+				for ( const i of cells ) {
+					sub[ i ] = 0;
+				}
+			}
 		}
 		shapes.sort( ( a, b ) => b.mass - a.mass );
 		const chosen = [];
