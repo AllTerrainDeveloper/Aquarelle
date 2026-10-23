@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="en">
+<head>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>Aquarelle</title>
+	<meta name="description" content="Turns a reference image into a procedurally painted watercolor, in real time.">
+	<link rel="stylesheet" href="css/app.css">
+</head>
+<body>
+<div class="app">
+	<aside class="panel" aria-label="Configuration">
+		<header class="brand">
+			<h1>Aquarelle</h1>
+			<p>A procedural watercolor painter that reconstructs your image, splash by splash.</p>
+		</header>
+
+		<section class="group">
+			<h2>Reference</h2>
+			<label class="drop" id="drop">
+				<input type="file" id="file" accept="image/*" hidden>
+				<canvas id="refPreview" width="1" height="1" hidden></canvas>
+				<span id="dropHint">Drop an image here or click to upload</span>
+			</label>
+			<div class="samples" id="samples" aria-label="Sample images"></div>
+		</section>
+
+		<section class="group">
+			<h2>Composition</h2>
+			<div class="field">
+				<label for="pigments">Pigments <output id="pigOut">8</output></label>
+				<input type="range" id="pigments" min="3" max="16" value="8">
+			</div>
+			<div class="field-row">
+				<div class="field">
+					<label for="duration">Duration (min)</label>
+					<input type="number" id="duration" min="0.5" max="60" step="0.5" value="10">
+				</div>
+				<div class="field">
+					<label for="seed">Seed</label>
+					<div class="inline">
+						<input type="number" id="seed" value="1234">
+						<button id="dice" type="button" class="icon" title="Random seed" aria-label="Random seed">⟳</button>
+					</div>
+				</div>
+			</div>
+			<div class="field">
+				<label for="quality">Simulation quality</label>
+				<select id="quality">
+					<option value="auto" selected>Auto</option>
+					<option value="448">High (448 px)</option>
+					<option value="360">Medium (360 px)</option>
+					<option value="280">Low (280 px)</option>
+				</select>
+			</div>
+			<button id="analyze" type="button" class="primary" disabled>Analyze image</button>
+			<div id="swatches" class="swatches"></div>
+			<p id="planInfo" class="muted small"></p>
+		</section>
+
+		<section class="group">
+			<h2>Painting</h2>
+			<div class="buttons">
+				<button id="start" type="button" class="primary" disabled>Start painting</button>
+				<button id="pause" type="button" disabled>Pause</button>
+				<button id="restart" type="button" disabled>Restart</button>
+			</div>
+			<div class="field">
+				<label for="speed">Playback speed <output id="speedOut">1×</output></label>
+				<input type="range" id="speed" min="0" max="8" value="2">
+			</div>
+			<div class="field">
+				<label for="view">View</label>
+				<select id="view">
+					<option value="0">Painting</option>
+					<option value="1">Wet areas</option>
+					<option value="2">Error heatmap</option>
+				</select>
+			</div>
+			<label class="check"><input type="checkbox" id="hand" checked> Show the artist's gestures</label>
+			<label class="check"><input type="checkbox" id="compare"> Show reference side by side</label>
+		</section>
+
+		<section class="group">
+			<h2>Export</h2>
+			<div class="buttons">
+				<select id="exportScale" aria-label="Export scale">
+					<option value="2">2×</option>
+					<option value="3" selected>3×</option>
+					<option value="4">4×</option>
+				</select>
+				<button id="exportPng" type="button" disabled>Export PNG</button>
+				<button id="record" type="button" disabled>Record video</button>
+			</div>
+			<p id="exportInfo" class="muted small"></p>
+		</section>
+
+		<section class="group">
+			<h2>Diagnostics</h2>
+			<dl id="perf" class="perf"></dl>
+			<button id="bench" type="button">Run benchmark on the 5 samples</button>
+			<div id="benchOut" class="bench"></div>
+		</section>
+	</aside>
+
+	<main class="stage">
+		<div class="hud" aria-live="polite">
+			<span id="stageName" class="stage-name">Ready</span>
+			<span id="time">0:00 / 10:00</span>
+			<span id="pct">0%</span>
+			<span id="fps" class="pill">— fps</span>
+			<span id="sim" class="pill">similarity —</span>
+		</div>
+		<div class="progress"><div id="bar"></div></div>
+		<div class="canvases" id="canvases">
+			<figure class="paint">
+				<canvas id="paint" aria-label="Watercolor painting"></canvas>
+				<canvas id="overlay" aria-hidden="true"></canvas>
+			</figure>
+			<figure class="ref" id="refFig" hidden>
+				<canvas id="refCanvas"></canvas>
+				<figcaption>Reference</figcaption>
+			</figure>
+		</div>
+		<p class="status" id="status">Upload an image or pick a sample to begin.</p>
+	</main>
+</div>
+<script type="module" src="js/main.js"></script>
+</body>
+</html>
