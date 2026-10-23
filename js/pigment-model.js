@@ -419,7 +419,8 @@ export class PigmentModel {
 			b.by0 = Math.max( 0, Math.floor( y0 ) );
 			b.bw = Math.max( 1, Math.min( W - 1, Math.ceil( x1 ) ) - b.bx0 + 1 );
 			b.bh = Math.max( 1, Math.min( H - 1, Math.ceil( y1 ) ) - b.by0 + 1 );
-			b.mask = new Uint8Array( b.bw * b.bh );
+			// Coverage fraction per cell for this stroke (soft edges top up).
+			b.mask = new Float32Array( b.bw * b.bh );
 			b.tone = b.amount * b.meanNeed;
 		}
 		const k = b.k;
@@ -439,6 +440,15 @@ export class PigmentModel {
 			const cx = P[ j ];
 			const cy = P[ j + 1 ];
 			const ext = tr * 1.25 + 1;
+			// Graded wash: the tone follows what the target needs where the brush
+			// is now (at the wash's soft scale), changing smoothly along the path.
+			let tone = b.tone;
+			if ( b.graded && gk ) {
+				const ci = Math.min( H - 1, Math.max( 0, Math.round( cy ) ) ) * W + Math.min( W - 1, Math.max( 0, Math.round( cx ) ) );
+				// Against dried paint only: the stroke's own fresh (suspended) paint
+				// must not make its leading edge think the job is already done.
+				tone = b.amount * Math.max( 0, this.T[ b.level ][ k ][ ci ] - this.d[ k ][ ci ] );
+			}
 			const xa = Math.max( b.bx0, Math.floor( cx - ext ) );
 			const xb = Math.min( b.bx0 + b.bw - 1, Math.ceil( cx + ext ) );
 			const ya = Math.max( b.by0, Math.floor( cy - ext ) );
@@ -446,27 +456,53 @@ export class PigmentModel {
 			for ( let y = ya; y <= yb; y++ ) {
 				for ( let x = xa; x <= xb; x++ ) {
 					const mi = ( y - b.by0 ) * b.bw + ( x - b.bx0 );
-					if ( b.mask[ mi ] ) {
+					const gi = y * W + x;
+					const washed = b.shared ? b.shared[ gi ] : 0;
+					if ( b.mask[ mi ] >= 1 ) {
 						continue;
 					}
+					// Already fully washed by an earlier row of this object: re-wet the
+					// bead (no more pigment) so rows merge instead of drying into stripes.
+					if ( washed >= 1 ) {
+						b.mask[ mi ] = 1;
+						if ( ! this.reserve[ gi ] ) {
+							const hv = h[ gi ] + b.water * 0.4;
+							h[ gi ] = hv > 1.6 ? 1.6 : hv;
+							tx0 = Math.min( tx0, x );
+							tx1 = Math.max( tx1, x );
+							ty0 = Math.min( ty0, y );
+							ty1 = Math.max( ty1, y );
+						}
+						continue;
+					}
+					const had = Math.max( b.mask[ mi ], washed );
 					const n = valueNoise( x * 0.35, y * 0.35, seed );
 					// Ragged edge: bristles skip on the paper's tooth.
-					const d = Math.hypot( x - cx, y - cy ) / tr + ( n - 0.5 ) * 0.45 + ( this.paper[ y * W + x ] - 0.5 ) * 0.25;
+					const d = Math.hypot( x - cx, y - cy ) / tr + ( n - 0.5 ) * 0.3 + ( this.paper[ y * W + x ] - 0.5 ) * 0.2;
 					if ( d >= 1 ) {
 						continue;
 					}
-					b.mask[ mi ] = 1;
+					// Soft falloff at the very edge of the tip (no hard grid steps);
+					// a later, fuller touch tops the cell up rather than skipping it.
+					const cover = d > 0.7 ? ( 1 - d ) / 0.3 : 1;
+					if ( cover <= had ) {
+						continue;
+					}
+					b.mask[ mi ] = cover;
 					const i = y * W + x;
 					if ( this.reserve[ i ] ) {
 						continue;
 					}
+					if ( b.shared ) {
+						b.shared[ i ] = cover;
+					}
 					if ( gk ) {
-						const add = b.tone * ( 0.9 + 0.2 * n );
+						const add = tone * ( 0.9 + 0.2 * n ) * ( cover - had );
 						gk[ i ] += add;
 						total += add;
 					}
 					if ( b.water > 0 ) {
-						const hv = h[ i ] + b.water * ( 0.8 + 0.4 * n );
+						const hv = h[ i ] + b.water * ( 0.8 + 0.4 * n ) * ( cover - had );
 						h[ i ] = hv > 1.6 ? 1.6 : hv;
 					}
 					tx0 = Math.min( tx0, x );

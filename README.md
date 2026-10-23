@@ -60,6 +60,18 @@ animated hand; `?bench=1&benchSpeed=16&benchRt=20` runs the benchmark
    areas. The pigment-mass rule above caps every stamp at the remaining
    need, so pigment overshoot only comes from flow; dark mistakes are
    corrected by lifting.
+3a. **Object by object, like a painter.** The big segmented areas (sky,
+   hair, face, coat) are the objects. They are painted light to dark and
+   background to front, each in one go: cut in the edge with one
+   continuous stroke that follows the contour (only where the image has a
+   real edge), then carry a *graded* wash across the inside in gently
+   wavering rows, top to bottom, with rounded turns, the tone following
+   what the image needs as the brush moves. Each wash deliberately runs a
+   little past its edge under the neighbours painted later (and into soft
+   borders), so the next, darker colour defines the edge and no white gaps
+   are left; the sheet edge is never a border. Secondary colours are
+   charged into the wet wash, and the next object is never one touching a
+   still-wet one. Every path is smoothed and evenly paced, like a hand.
 3b. **Nothing is ever trimmed to the image.** A drop is one tone with its
    own ragged outline; a brush stroke paints exactly the ribbon its tip
    sweeps. Fidelity comes from *planning*, as a painter's does:

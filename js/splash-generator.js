@@ -175,6 +175,18 @@ export class SplashGenerator {
 		this.animator.add( { ...g, blob } );
 	}
 
+	/** One "already painted" record per object wash, shared by all its rows. */
+	_washMask( id ) {
+		this._washes = this._washes || new Map();
+		if ( ! this._washes.has( id ) ) {
+			if ( this._washes.size > 4 ) {
+				this._washes.delete( this._washes.keys().next().value );
+			}
+			this._washes.set( id, new Float32Array( this.an.W * this.an.H ) );
+		}
+		return this._washes.get( id );
+	}
+
 	get now() {
 		return this.animator ? this.animator.clock : 0;
 	}
@@ -327,8 +339,10 @@ export class SplashGenerator {
 			const s = total > 0 ? cum[ q ] / total : q / Math.max( 1, n - 1 );
 			// Pressure: lighter as the brush lands and lifts.
 			const u = n > 1 ? q / ( n - 1 ) : 0.5;
-			const press = 0.75 + 0.25 * Math.min( 1, u / 0.12, ( 1 - u ) / 0.12 );
-			const ok = k < 0 || this.belongs( k, x, y );
+			// A gentle taper only at the very ends of a stroke.
+			const press = 0.88 + 0.12 * Math.min( 1, u / 0.06, ( 1 - u ) / 0.06 );
+			// Object sweeps were planned to run under later neighbours on purpose.
+			const ok = op.trust || k < 0 || this.belongs( k, x, y );
 			path[ q * 4 ] = x;
 			path[ q * 4 + 1 ] = y;
 			path[ q * 4 + 2 ] = Math.min( 0.9999, s );
@@ -352,10 +366,12 @@ export class SplashGenerator {
 			spill: 0,
 			seed: rng.u32(),
 			path,
+			shared: op.shared,
+			graded: op.graded,
 		};
 		const B = this.an.B;
 		const tip = op.r ?? 1.5;
-		const dur = Math.min( 2.6, 0.25 + total / ( B * 0.3 ) );
+		const dur = op.speed ? Math.min( 8, 0.2 + total / op.speed ) : Math.min( 2.6, 0.25 + total / ( B * 0.3 ) );
 		const approach = 0.08 + 0.14 * Math.min( 1, tip / ( B * 0.025 ) );
 		const start = anim ? Math.max( this.now + delay, anim.brushFreeAt + approach ) : 0;
 		if ( anim ) {
@@ -495,7 +511,7 @@ export class SplashGenerator {
 						this._drop( rng, op, x, y, op.fit, k, {
 							crown: Math.round( 3 + ( op.fit / B ) * 90 ),
 							spray: op.drop && rng.float() < 0.5 ? rng.int( 8 ) : 0,
-							extra: { amp: 0.15, soft: 0.45, aspect: rng.range( 1, 1.12 ) },
+							extra: { amp: 0.15, soft: op.soft ?? 0.45, aspect: rng.range( 1, 1.12 ) },
 							fit: op.fit,
 						} );
 					} else {
@@ -515,6 +531,11 @@ export class SplashGenerator {
 				} else {
 					this._brush( rng, op, x, y, r, k, { amp: 0.18, soft: 0.45, queue: !! op.brushOnly } );
 				}
+				return true;
+
+			case 'sweep':
+				// One row-by-row pass of an object's wash, carried top to bottom.
+				this._brushAlong( rng, { ...op, trust: true, graded: true, shared: this._washMask( op.wash ) }, op.k );
 				return true;
 
 			case 'detail':

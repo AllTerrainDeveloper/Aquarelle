@@ -317,7 +317,10 @@ export function centrelineStrokes( cells, W, { minR = 0.7, maxSamples = 160 } = 
 				}
 			}
 		}
-		// Long chains become several strokes, as a hand would.
+		// Smooth, evenly paced path; long chains become several strokes.
+		const smooth = pts.length >= 9 ? smoothPath( pts, Math.max( 0.6, ( pts.reduce( ( a2, v, q ) => ( 2 === q % 3 ? a2 + v : a2 ), 0 ) / ( pts.length / 3 ) ) * 0.45 ) ) : pts;
+		pts.length = 0;
+		pts.push( ...smooth );
 		for ( let o = 0; o < pts.length; o += maxSamples * 3 ) {
 			const part = pts.slice( o, o + maxSamples * 3 + 3 );
 			let len = 0;
@@ -334,10 +337,310 @@ export function centrelineStrokes( cells, W, { minR = 0.7, maxSamples = 160 } = 
 	return strokes;
 }
 
+/**
+ * Cells within `margin` of a shape (outside it) that `accept` allows: where a
+ * wash may deliberately run past its edge, under a neighbour painted later.
+ */
+export function expandCells( cells, W, H, margin, accept ) {
+	let x0 = Infinity;
+	let y0 = Infinity;
+	let x1 = -Infinity;
+	let y1 = -Infinity;
+	for ( const i of cells ) {
+		const x = i % W;
+		const y = ( i / W ) | 0;
+		x0 = Math.min( x0, x );
+		y0 = Math.min( y0, y );
+		x1 = Math.max( x1, x );
+		y1 = Math.max( y1, y );
+	}
+	const m = Math.ceil( margin ) + 1;
+	const bx = Math.max( 0, x0 - m );
+	const by = Math.max( 0, y0 - m );
+	const lw = Math.min( W - 1, x1 + m ) - bx + 1;
+	const lh = Math.min( H - 1, y1 + m ) - by + 1;
+	// Distance from each outside cell to the shape: depth of the complement.
+	const outside = new Uint8Array( lw * lh ).fill( 1 );
+	for ( const i of cells ) {
+		outside[ ( ( ( i / W ) | 0 ) - by ) * lw + ( ( i % W ) - bx ) ] = 0;
+	}
+	const dist = depthInside( outside, lw, lh );
+	const out = [];
+	for ( let ly = 0; ly < lh; ly++ ) {
+		for ( let lx = 0; lx < lw; lx++ ) {
+			const li = ly * lw + lx;
+			if ( outside[ li ] && dist[ li ] <= margin ) {
+				const i = ( ly + by ) * W + ( lx + bx );
+				if ( accept( i ) ) {
+					out.push( i );
+				}
+			}
+		}
+	}
+	return out;
+}
+
+/**
+ * Turn a polyline of [x, y, r] triples into a hand-like path: corners are
+ * cut (Chaikin) so turns become curves, then the path is resampled at even
+ * spacing so the tip moves at a steady pace. Width changes smoothly too.
+ */
+export function smoothPath( pts, spacing, iterations = 3 ) {
+	let p = Array.from( pts );
+	for ( let it = 0; it < iterations && p.length >= 9; it++ ) {
+		const q = [ p[ 0 ], p[ 1 ], p[ 2 ] ];
+		for ( let k = 0; k + 5 < p.length; k += 3 ) {
+			for ( const t of [ 0.25, 0.75 ] ) {
+				q.push( p[ k ] + ( p[ k + 3 ] - p[ k ] ) * t, p[ k + 1 ] + ( p[ k + 4 ] - p[ k + 1 ] ) * t, p[ k + 2 ] + ( p[ k + 5 ] - p[ k + 2 ] ) * t );
+			}
+		}
+		q.push( p[ p.length - 3 ], p[ p.length - 2 ], p[ p.length - 1 ] );
+		p = q;
+	}
+	// Resample by arc length.
+	const out = [ p[ 0 ], p[ 1 ], p[ 2 ] ];
+	let carry = 0;
+	for ( let k = 3; k < p.length; k += 3 ) {
+		const ax = p[ k - 3 ];
+		const ay = p[ k - 2 ];
+		const ar = p[ k - 1 ];
+		const seg = Math.hypot( p[ k ] - ax, p[ k + 1 ] - ay );
+		let d = spacing - carry;
+		while ( d <= seg ) {
+			const t = seg > 0 ? d / seg : 0;
+			out.push( ax + ( p[ k ] - ax ) * t, ay + ( p[ k + 1 ] - ay ) * t, ar + ( p[ k + 2 ] - ar ) * t );
+			d += spacing;
+		}
+		carry = seg - ( d - spacing );
+	}
+	if ( p.length > 3 ) {
+		out.push( p[ p.length - 3 ], p[ p.length - 2 ], p[ p.length - 1 ] );
+	}
+	return out;
+}
+
+/**
+ * How a painter washes one object: cut in the edge where the image really
+ * has an edge (strokes along the contour), then carry the wash across in
+ * gently wavering rows from top to bottom, alternating direction with
+ * rounded turns, so the bead flows and dries evenly. Where the object meets
+ * a neighbour softly, or the edge of the sheet, there is no cut-in: the
+ * rows simply run on (into the overlap, or off the paper).
+ *
+ * @param {Object} o { H, edgeNear (strong edge within reach), rng }
+ */
+export function sweepStrokes( cells, W, w, seam, o, maxSamples = 260 ) {
+	const { H, edgeNear, rng } = o;
+	let x0 = Infinity;
+	let y0 = Infinity;
+	let x1 = -Infinity;
+	let y1 = -Infinity;
+	for ( const i of cells ) {
+		const x = i % W;
+		const y = ( i / W ) | 0;
+		x0 = Math.min( x0, x );
+		y0 = Math.min( y0, y );
+		x1 = Math.max( x1, x );
+		y1 = Math.max( y1, y );
+	}
+	const lw = x1 - x0 + 3;
+	const lh = y1 - y0 + 3;
+	const local = new Uint8Array( lw * lh );
+	for ( const i of cells ) {
+		local[ ( ( ( i / W ) | 0 ) - y0 + 1 ) * lw + ( ( i % W ) - x0 + 1 ) ] = 1;
+	}
+	// The sheet edge is not a border: extend the shape past it.
+	for ( let ly = 1; ly < lh - 1; ly++ ) {
+		if ( 0 === x0 && local[ ly * lw + 1 ] ) {
+			local[ ly * lw ] = 1;
+		}
+		if ( W - 1 === x1 && local[ ly * lw + lw - 2 ] ) {
+			local[ ly * lw + lw - 1 ] = 1;
+		}
+	}
+	for ( let lx = 0; lx < lw; lx++ ) {
+		if ( 0 === y0 && local[ lw + lx ] ) {
+			local[ lx ] = 1;
+		}
+		if ( H - 1 === y1 && local[ ( lh - 2 ) * lw + lx ] ) {
+			local[ ( lh - 1 ) * lw + lx ] = 1;
+		}
+	}
+	const depth = depthInside( local, lw, lh );
+	const at = ( lx, ly ) => {
+		const xi = Math.min( lw - 1, Math.max( 0, Math.round( lx ) ) );
+		const yi = Math.min( lh - 1, Math.max( 0, Math.round( ly ) ) );
+		return yi * lw + xi;
+	};
+	const strong = ( lx, ly ) => edgeNear[ Math.min( H - 1, Math.max( 0, Math.round( ly + y0 - 1 ) ) ) * W + Math.min( W - 1, Math.max( 0, Math.round( lx + x0 - 1 ) ) ) ];
+
+	// Cut in only along real edges.
+	const bandW = w * 0.9;
+	const band = [];
+	for ( let ly = 1; ly < lh - 1; ly++ ) {
+		for ( let lx = 1; lx < lw - 1; lx++ ) {
+			const li = ly * lw + lx;
+			if ( local[ li ] && depth[ li ] <= bandW && strong( lx, ly ) ) {
+				band.push( ( ly + y0 - 1 ) * W + ( lx + x0 - 1 ) );
+			}
+		}
+	}
+	const finish = ( raw, edge ) => {
+		const sm = smoothPath( raw, Math.max( 0.6, w * 0.45 ) );
+		const out = [];
+		for ( let o2 = 0; o2 < sm.length; o2 += maxSamples * 3 ) {
+			const part = sm.slice( o2, o2 + maxSamples * 3 + 3 );
+			if ( part.length < 6 ) {
+				continue;
+			}
+			let len = 0;
+			for ( let q = 3; q < part.length; q += 3 ) {
+				len += Math.hypot( part[ q ] - part[ q - 3 ], part[ q + 1 ] - part[ q - 2 ] );
+			}
+			out.push( { pts: Float32Array.from( part ), len, r: w, x: part[ 0 ], y: part[ 1 ], edge } );
+		}
+		return out;
+	};
+	const strokes = [];
+	if ( band.length ) {
+		// One continuous line along the contour, half a band inside the edge
+		// (an iso-line of the distance to the edge), ordered into long paths.
+		const mid = bandW * 0.5;
+		const iso = [];
+		for ( let ly = 1; ly < lh - 1; ly++ ) {
+			for ( let lx = 1; lx < lw - 1; lx++ ) {
+				const li = ly * lw + lx;
+				if ( local[ li ] && Math.abs( depth[ li ] - mid ) < 0.75 && strong( lx, ly ) ) {
+					iso.push( lx, ly );
+				}
+			}
+		}
+		const n = iso.length / 2;
+		const used = new Uint8Array( n );
+		// Grid buckets for nearest-point lookup along the line.
+		const cell = 3;
+		const gw = Math.ceil( lw / cell );
+		const buckets = new Map();
+		for ( let q = 0; q < n; q++ ) {
+			const key = Math.floor( iso[ q * 2 ] / cell ) + gw * Math.floor( iso[ q * 2 + 1 ] / cell );
+			if ( ! buckets.has( key ) ) {
+				buckets.set( key, [] );
+			}
+			buckets.get( key ).push( q );
+		}
+		const nearest = ( x, y, maxD ) => {
+			let best = -1;
+			let bd = maxD;
+			const bx = Math.floor( x / cell );
+			const by = Math.floor( y / cell );
+			const reach = Math.ceil( maxD / cell );
+			for ( let dy = -reach; dy <= reach; dy++ ) {
+				for ( let dx = -reach; dx <= reach; dx++ ) {
+					for ( const q of buckets.get( bx + dx + gw * ( by + dy ) ) || [] ) {
+						if ( ! used[ q ] ) {
+							const d = Math.hypot( iso[ q * 2 ] - x, iso[ q * 2 + 1 ] - y );
+							if ( d < bd ) {
+								bd = d;
+								best = q;
+							}
+						}
+					}
+				}
+			}
+			return best;
+		};
+		const tip = Math.max( 0.9, bandW * 0.6 );
+		for ( let s0 = 0; s0 < n; s0++ ) {
+			if ( used[ s0 ] ) {
+				continue;
+			}
+			// Walk both ways from the seed so the line is not split in the middle.
+			const walkFrom = ( q0 ) => {
+				const seq = [];
+				let q = q0;
+				while ( q >= 0 ) {
+					used[ q ] = 1;
+					seq.push( q );
+					q = nearest( iso[ q * 2 ], iso[ q * 2 + 1 ], 2.5 );
+				}
+				return seq;
+			};
+			used[ s0 ] = 1;
+			const fwd = walkFrom( nearest( iso[ s0 * 2 ], iso[ s0 * 2 + 1 ], 2.5 ) );
+			const back = walkFrom( nearest( iso[ s0 * 2 ], iso[ s0 * 2 + 1 ], 2.5 ) );
+			const order = back.filter( ( q ) => q >= 0 ).reverse().concat( [ s0 ], fwd.filter( ( q ) => q >= 0 ) );
+			if ( order.length < 4 ) {
+				continue;
+			}
+			const raw = [];
+			for ( const q of order ) {
+				raw.push( iso[ q * 2 ] + x0 - 1, iso[ q * 2 + 1 ] + y0 - 1, tip );
+			}
+			strokes.push( ...finish( raw, true ) );
+		}
+	}
+	// A cell can take the full tip if it is deep inside, or if the border
+	// near it is soft (no real edge): there the wash simply runs on.
+	const roomy = ( lx, ly ) => {
+		const li = at( lx, ly );
+		return local[ li ] && ( depth[ li ] >= w * 0.5 || ! strong( lx, ly ) );
+	};
+	let raw = [];
+	let lastX = 0;
+	let lastY = 0;
+	let row = 0;
+	const flush = () => {
+		if ( raw.length >= 6 ) {
+			strokes.push( ...finish( raw, false ) );
+		}
+		raw = [];
+	};
+	const phase = rng.range( 0, Math.PI * 2 );
+	const wave = rng.range( 0.012, 0.03 );
+	for ( let ly = 1 + w * 0.6; ly < lh - 1; ly += w * rng.range( 1.25, 1.55 ), row++ ) {
+		const runs = [];
+		let start = -1;
+		for ( let lx = 0; lx < lw; lx++ ) {
+			const on = roomy( lx, ly );
+			if ( on && start < 0 ) {
+				start = lx;
+			}
+			if ( ( ! on || lx === lw - 1 ) && start >= 0 ) {
+				runs.push( [ start, on ? lx : lx - 1 ] );
+				start = -1;
+			}
+		}
+		if ( row & 1 ) {
+			runs.reverse();
+		}
+		for ( const [ a0, a1 ] of runs ) {
+			const from = row & 1 ? a1 : a0;
+			const to = row & 1 ? a0 : a1;
+			const gy = ly + y0 - 1;
+			if ( raw.length && Math.hypot( from + x0 - 1 - lastX, gy - lastY ) > w * 3 ) {
+				flush();
+			}
+			const n = Math.max( 1, Math.ceil( Math.abs( to - from ) / Math.max( 0.6, w * 0.5 ) ) );
+			for ( let q = 0; q <= n; q++ ) {
+				const lx = from + ( ( to - from ) * q ) / n;
+				// The row wavers a little, as a hand does.
+				const wy = ly + Math.sin( ( lx + x0 ) * wave + phase + row ) * w * 0.22;
+				const li = at( lx, wy );
+				const r = strong( lx, wy ) ? Math.min( w, depth[ li ] + seam * 0.5 ) : w;
+				lastX = lx + x0 - 1;
+				lastY = wy + y0 - 1;
+				raw.push( lastX, lastY, Math.max( 0.8, r ) );
+			}
+		}
+	}
+	flush();
+	return strokes;
+}
+
 export function planComposition( an, { duration, seed, density = 1, fineDetail = { strokes: 1, fine: 1 } } ) {
 	const t0 = performance.now();
 	const rng = new Rng( ( seed ^ 0x9e3779b9 ) >>> 0 );
-	const { W, H, B, pigments, T, edge, detail, importance, scale, darkness, labels, regions, regionOf } = an;
+	const { W, H, B, pigments, T, edge, detail, importance, scale, darkness, labels, regions, regionOf, reserve } = an;
 	const N = W * H;
 	const K = pigments.length;
 	const at = ( x, y ) => Math.min( H - 1, Math.max( 0, Math.round( y ) ) ) * W + Math.min( W - 1, Math.max( 0, Math.round( x ) ) );
@@ -384,76 +687,246 @@ export function planComposition( an, { duration, seed, density = 1, fineDetail =
 	const depthIn = ( mask ) => depthInside( mask, W, H, B );
 	const pack = ( mask, depth, covered, maxR, minR, jitter ) => packDiscs( mask, depth, covered, { W, H, maxR, minR, jitter, seam, rng } );
 	const seam = Math.max( 2, B * 0.015 );
-	const leftover = []; // per pigment: area cells no disc reached (for stage 4)
-	const bigR = B * 0.06;
+	const leftover = []; // per pigment: cells no object covered (for stage 4)
+	const fixedOps = []; // object sweeps and charges, already timed
+
+	/* Object by object, like a painter: back to front, light to dark ---- */
+	// The large segmented regions are the objects (sky, hair, face, coat).
+	// Background objects (touching the sheet edge, unimportant, big) and light
+	// ones come first; the subject and darks come later. Each object is
+	// painted in one go: its main colour carried down in wet-edge sweeps,
+	// then its secondary colours and shadow charged in while it is still wet.
+	// The next object is never one that touches a still-wet object.
+	const minObj = Math.max( 30, ( B * 0.035 ) ** 2 );
+	const objects = [];
+	const objOf = new Int32Array( N ).fill( -1 );
+	const regIndex = new Int32Array( regions.length ).fill( -1 );
+	regions.forEach( ( reg, r ) => {
+		if ( reg.area >= minObj && ! pigments[ reg.label ].isPaper ) {
+			regIndex[ r ] = objects.length;
+			objects.push( { reg, cells: [] } );
+		}
+	} );
+	for ( let i = 0; i < N; i++ ) {
+		const o = regIndex[ regionOf[ i ] ];
+		if ( o >= 0 ) {
+			objOf[ i ] = o;
+			objects[ o ].cells.push( i );
+		}
+	}
+	const adj = objects.map( () => new Set() );
+	for ( let y = 0; y < H; y++ ) {
+		for ( let x = 0; x < W; x++ ) {
+			const i = y * W + x;
+			const a = objOf[ i ];
+			if ( a < 0 ) {
+				continue;
+			}
+			for ( const j2 of [ x < W - 1 ? i + 1 : -1, y < H - 1 ? i + W : -1 ] ) {
+				const b = j2 >= 0 ? objOf[ j2 ] : -1;
+				if ( b >= 0 && b !== a ) {
+					adj[ a ].add( b );
+					adj[ b ].add( a );
+				}
+			}
+		}
+	}
+	for ( const ob of objects ) {
+		const reg = ob.reg;
+		// Main colour: the pigment the object calls for most.
+		const sums = new Float64Array( K );
+		for ( const i of ob.cells ) {
+			for ( let k = 0; k < K; k++ ) {
+				sums[ k ] += T[ 0 ][ k ][ i ];
+			}
+		}
+		let main = reg.label;
+		for ( let k = 0; k < K; k++ ) {
+			if ( ! pigments[ k ].isPaper && sums[ k ] > sums[ main ] ) {
+				main = k;
+			}
+		}
+		ob.main = main;
+		ob.sums = sums;
+		const border = reg.minX <= 1 || reg.minY <= 1 || reg.maxX >= W - 2 || reg.maxY >= H - 2;
+		// Light to dark above all (later, darker washes cover earlier overlaps),
+		// then background before subject, big before small.
+		ob.key = ( 1 - pigments[ main ].L ) + 0.3 * reg.importance - ( border ? 0.2 : 0 ) - 0.3 * ( reg.area / N );
+	}
+	const pending = objects.map( ( o, n ) => n ).sort( ( a, b ) => objects[ a ].key - objects[ b ].key );
+	const sequence = [];
+	const recent = [];
+	while ( pending.length ) {
+		let pick = pending.findIndex( ( o ) => ! recent.some( ( r ) => adj[ o ].has( r ) ) );
+		if ( pick < 0 ) {
+			pick = 0;
+		}
+		const o = pending.splice( pick, 1 )[ 0 ];
+		sequence.push( o );
+		recent.push( o );
+		if ( recent.length > 2 ) {
+			recent.shift();
+		}
+	}
+	// Where the image has a real edge within reach (cut-in happens only there).
+	const edgeNear = new Uint8Array( N );
+	{
+		const er = Math.max( 2, Math.ceil( B * 0.012 ) );
+		const strongEdge = new Uint8Array( N );
+		for ( let i = 0; i < N; i++ ) {
+			strongEdge[ i ] = edge[ i ] > 0.3 ? 1 : 0;
+		}
+		const far = depthInside( strongEdge.map( ( v ) => 1 - v ), W, H, B );
+		for ( let i = 0; i < N; i++ ) {
+			edgeNear[ i ] = far[ i ] <= er ? 1 : 0;
+		}
+	}
+	const orderPos = new Int32Array( objects.length ).fill( -1 );
+	sequence.forEach( ( o, n ) => ( orderPos[ o ] = n ) );
+	const whiteish = ( i ) => bestT[ i ] < 0.05 || reserve[ i ];
+	// Build the sweeps; pick brush sizes so the whole sequence fits the time
+	// one hand has (about the first 55% of the painting).
+	const window = 0.53 * duration;
+	const speedOf = ( w ) => Math.max( B * 0.35, w * 14 );
+	let brushScale = 1;
+	let plan = null;
+	for ( let attempt = 0; attempt < 3; attempt++ ) {
+		plan = [];
+		let total = 0;
+		for ( const o of sequence ) {
+			const ob = objects[ o ];
+			const main = ob.main;
+			const own = ob.cells.filter( ( i ) => T[ 0 ][ main ][ i ] >= 0.35 * bestT[ i ] );
+			if ( own.length < 6 ) {
+				continue;
+			}
+			const thick = Math.sqrt( own.length / Math.PI );
+			const w = Math.min( B * 0.05, Math.max( B * 0.01, thick * 0.45 * brushScale ) );
+			// Run deliberately past the edge, under neighbours painted later (and
+			// small unassigned bits), never under earlier ones or into whites.
+			const pos = orderPos[ o ];
+			const margin = Math.max( 3, w * 1.2 );
+			const extra = expandCells( own, W, H, margin, ( i ) => {
+				if ( whiteish( i ) ) {
+					return false;
+				}
+				const other = objOf[ i ];
+				// Under later neighbours always; under earlier ones only where the
+				// border is soft (no real edge), so gradients blend.
+				return other < 0 || orderPos[ other ] > pos || ! edgeNear[ i ];
+			} );
+			const cells = own.concat( extra );
+			const strokes = sweepStrokes( cells, W, w, seam, { H, edgeNear, rng } );
+			let secs = 0;
+			for ( const st of strokes ) {
+				secs += 0.45 + st.len / speedOf( w );
+			}
+			total += secs;
+			plan.push( { o, cells, w, strokes, secs } );
+		}
+		if ( total <= window * 0.92 ) {
+			break;
+		}
+		brushScale *= Math.sqrt( total / ( window * 0.92 ) );
+	}
+	let tc = duration * 0.01;
+	for ( const item of plan ) {
+		const ob = objects[ item.o ];
+		const main = ob.main;
+		const stage = tc < duration * 0.17 ? 0 : tc < duration * 0.36 ? 1 : 2;
+		for ( const st of item.strokes ) {
+			const secs = 0.45 + st.len / speedOf( item.w );
+			fixedOps.push( {
+				type: 'sweep',
+				k: main,
+				x: st.x,
+				y: st.y,
+				r: item.w,
+				path: st.pts,
+				speed: speedOf( item.w ),
+				// All rows of one object's wash share what is already painted.
+				wash: item.o,
+				level: 1,
+				amount: 0.8,
+				water: rng.range( 0.5, 0.7 ),
+				chaos: 0.1,
+				stage,
+				t: tc,
+				seed: rng.u32(),
+				fixed: true,
+			} );
+			tc += secs;
+		}
+		// Charge while wet: secondary colours and the darker side of the main
+		// colour dropped into the fresh wash, where the object calls for them.
+		const charges = [];
+		const meanMain = ob.sums[ main ] / ob.cells.length;
+		for ( let k = 0; k < K; k++ ) {
+			if ( pigments[ k ].isPaper ) {
+				continue;
+			}
+			// The graded wash carries the main colour's values; only clearly
+			// present secondary colours are charged in.
+			const isMain = k === main;
+			if ( isMain || ob.sums[ k ] < 0.25 * ob.sums[ main ] ) {
+				continue;
+			}
+			const sub = new Uint8Array( N );
+			let cnt = 0;
+			for ( const i of ob.cells ) {
+				const v = T[ 0 ][ k ][ i ];
+				if ( isMain ? v > meanMain * 1.25 : v >= 0.35 * bestT[ i ] && v > 0.05 ) {
+					sub[ i ] = 1;
+					cnt++;
+				}
+			}
+			if ( cnt < 8 ) {
+				continue;
+			}
+			for ( const d of packDiscs( sub, depthInside( sub, W, H, B ), new Uint8Array( N ), { W, H, maxR: B * 0.045, minR: B * 0.01, jitter: 0.25, seam: 0, rng, limit: 3 } ) ) {
+				charges.push( { k, d } );
+			}
+		}
+		let tw = tc - rng.range( 0.4, 1.2 );
+		for ( const { k, d } of charges ) {
+			tw += rng.range( 0.25, 0.7 );
+			fixedOps.push( {
+				type: 'wash',
+				k,
+				x: d.x,
+				y: d.y,
+				r: d.fit / 1.25,
+				fit: d.fit,
+				drop: true,
+				level: 0,
+				amount: 0.5,
+				// Charged into wet paint: lots of water so it melts in softly.
+				water: rng.range( 0.8, 1.05 ),
+				soft: 0.75,
+				chaos: 0.15,
+				stage,
+				t: Math.max( 0, tw ),
+				seed: rng.u32(),
+				fixed: true,
+			} );
+		}
+		// A breath before the next object.
+		tc += rng.range( 0.4, 1.0 );
+	}
+
+	// Whatever no object covered (small regions, slivers) goes to the fine
+	// brush in stage 4.
 	for ( let k = 0; k < K; k++ ) {
 		if ( pigments[ k ].isPaper ) {
 			continue;
 		}
-		// First wash: the shared tone at the broadest scale.
-		const area1 = areaOf( k, T[ 2 ][ k ] );
-		const cov1 = new Uint8Array( N );
-		for ( const d of pack( area1, depthIn( area1 ), cov1, B * 0.13, B * 0.025, 0.15 ) ) {
-			add( d.fit >= bigR ? 0 : 1, {
-				type: 'wash',
-				k,
-				x: d.x,
-				y: d.y,
-				r: d.fit / 1.25,
-				fit: d.fit,
-				drop: d.fit >= bigR,
-				level: 2,
-				amount: 0.6,
-				water: rng.range( 0.75, 1.05 ),
-				chaos: 0.2,
-				order: 0.6 * ( 1 - pigments[ k ].L ) + rng.range( 0, 0.4 ),
-			} );
-		}
-		// Second glaze: finer, jittered, building the value up.
-		const area2 = areaOf( k, T[ 1 ][ k ] );
-		const cov2 = new Uint8Array( N );
-		for ( const d of pack( area2, depthIn( area2 ), cov2, B * 0.06, B * 0.02, 0.3 ) ) {
-			add( 2, {
-				type: 'wash',
-				k,
-				x: d.x,
-				y: d.y,
-				r: d.fit / 1.25,
-				fit: d.fit,
-				level: 1,
-				amount: 0.85,
-				water: rng.range( 0.45, 0.7 ),
-				chaos: 0.2,
-				order: rng.float(),
-			} );
-		}
-		// Third glaze at full resolution: smaller marks that model the values
-		// (shading, gradients) inside each area.
-		const area3 = areaOf( k, T[ 0 ][ k ] );
-		const cov3 = new Uint8Array( N );
-		const discs3 = pack( area3, depthIn( area3 ), cov3, B * 0.035, B * 0.012, 0.35 ).slice( 0, Math.round( 90 * density ) );
-		for ( const d of discs3 ) {
-			add( 3, {
-				type: 'wash',
-				k,
-				x: d.x,
-				y: d.y,
-				r: d.fit / 1.25,
-				fit: d.fit,
-				level: 0,
-				amount: 0.9,
-				water: rng.range( 0.3, 0.5 ),
-				chaos: 0.2,
-				order: rng.float(),
-			} );
-		}
+		const area = areaOf( k, T[ 1 ][ k ] );
 		const rest = new Uint8Array( N );
 		for ( let i = 0; i < N; i++ ) {
-			rest[ i ] = area2[ i ] && ! cov2[ i ] && ! cov3[ i ] ? 1 : 0;
+			rest[ i ] = area[ i ] && objOf[ i ] < 0 ? 1 : 0;
 		}
 		leftover[ k ] = rest;
 	}
-	bestT = null;
 
 	/* 3. Transitions: wet-in-wet blends across soft region borders ---- */
 	const boundary = new Float32Array( N );
@@ -467,7 +940,8 @@ export function planComposition( an, { duration, seed, density = 1, fineDetail =
 			}
 		}
 	}
-	const n3 = Math.round( Math.min( 140, Math.max( 30, nb / ( B * 0.6 ) ) ) * density );
+	// Transitions now happen as wet-in-wet charges inside each object.
+	const n3 = 0;
 	const bSampler = new MapSampler( ( i ) => boundary[ i ], W, H );
 	for ( let j = 0; j < n3; j++ ) {
 		const p = bSampler.sample( rng );
@@ -708,6 +1182,8 @@ export function planComposition( an, { duration, seed, density = 1, fineDetail =
 		} );
 	} );
 
+	ops.push( ...fixedOps );
+
 	/* Blooms / backruns: clear water into damp washes a few seconds later */
 	const bloomables = ops.filter( ( o ) => ( 1 === o.stage || 2 === o.stage ) && 'wash' === o.type && o.r > B * 0.03 );
 	const nBloom = Math.min( bloomables.length, Math.round( ( 12 + rng.int( 10 ) ) * density ) );
@@ -735,11 +1211,14 @@ export function planComposition( an, { duration, seed, density = 1, fineDetail =
 	const nC = Math.min( Math.round( ops.length * 0.38 ), Math.round( 0.67 * duration * 0.35 * Math.sqrt( fineDetail.strokes ) ) );
 	for ( let j = 0; j < nC; j++ ) {
 		const u = ( j + rng.float() ) / nC;
-		const t = duration * ( 0.3 + 0.67 * Math.pow( u, 0.85 ) );
+		const t = duration * ( 0.56 + 0.41 * Math.pow( u, 0.85 ) );
 		ops.push( { type: 'correct', stage: stageAt( t / duration ), seed: rng.u32(), t, chaos: 0.5 } );
 	}
 
 	ops.sort( ( a, b ) => a.t - b.t );
+	// Object sweeps keep their own order and timing; sessions apply to the rest.
+	const all = ops;
+	const free = ops.filter( ( o ) => ! o.fixed );
 
 	/* Colour sessions across the whole timeline -------------------------- */
 	// Stages overlap in time, so per-stage grouping alone still alternates
@@ -801,13 +1280,13 @@ export function planComposition( an, { duration, seed, density = 1, fineDetail =
 		}
 		return out;
 	};
-	for ( let i = 0; i < ops.length; ) {
-		const tEnd = ops[ i ].t + sessionLen;
+	for ( let i = 0; i < free.length; ) {
+		const tEnd = free[ i ].t + sessionLen;
 		let j = i;
-		while ( j < ops.length && ops[ j ].t < tEnd ) {
+		while ( j < free.length && free[ j ].t < tEnd ) {
 			j++;
 		}
-		const chunk = ops.slice( i, j );
+		const chunk = free.slice( i, j );
 		const times = chunk.map( ( o ) => o.t );
 		const groupKey = ( o ) => {
 			if ( 'correct' === o.type ) {
@@ -834,7 +1313,7 @@ export function planComposition( an, { duration, seed, density = 1, fineDetail =
 		}
 		chunk.forEach( ( o, n ) => {
 			o.t = times[ n ];
-			ops[ i + n ] = o;
+			free[ i + n ] = o;
 		} );
 		for ( let n = chunk.length - 1; n >= 0; n-- ) {
 			const k = chunk[ n ].pk ?? chunk[ n ].k ?? -1;
@@ -845,6 +1324,8 @@ export function planComposition( an, { duration, seed, density = 1, fineDetail =
 		}
 		i = j;
 	}
+
+	all.sort( ( a, b ) => a.t - b.t );
 
 	const counts = STAGES.map( () => 0 );
 	const byType = {};

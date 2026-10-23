@@ -75,6 +75,59 @@ export function gaussBlur( src, W, H, sigma ) {
 	return b;
 }
 
+/** Chamfer distance from each masked cell to the nearest unmasked cell. */
+function chamferInside( mask, W, H ) {
+	const N = W * H;
+	const d = new Float32Array( N );
+	for ( let i = 0; i < N; i++ ) {
+		d[ i ] = mask[ i ] ? 1e9 : 0;
+	}
+	const S2 = Math.SQRT2;
+	for ( let y = 0; y < H; y++ ) {
+		for ( let x = 0; x < W; x++ ) {
+			const i = y * W + x;
+			if ( d[ i ] ) {
+				let v = d[ i ];
+				if ( x > 0 ) {
+					v = Math.min( v, d[ i - 1 ] + 1 );
+				}
+				if ( y > 0 ) {
+					v = Math.min( v, d[ i - W ] + 1 );
+					if ( x > 0 ) {
+						v = Math.min( v, d[ i - W - 1 ] + S2 );
+					}
+					if ( x < W - 1 ) {
+						v = Math.min( v, d[ i - W + 1 ] + S2 );
+					}
+				}
+				d[ i ] = v;
+			}
+		}
+	}
+	for ( let y = H - 1; y >= 0; y-- ) {
+		for ( let x = W - 1; x >= 0; x-- ) {
+			const i = y * W + x;
+			if ( d[ i ] ) {
+				let v = d[ i ];
+				if ( x < W - 1 ) {
+					v = Math.min( v, d[ i + 1 ] + 1 );
+				}
+				if ( y < H - 1 ) {
+					v = Math.min( v, d[ i + W ] + 1 );
+					if ( x < W - 1 ) {
+						v = Math.min( v, d[ i + W + 1 ] + S2 );
+					}
+					if ( x > 0 ) {
+						v = Math.min( v, d[ i + W - 1 ] + S2 );
+					}
+				}
+				d[ i ] = v;
+			}
+		}
+	}
+	return d;
+}
+
 /** Separable local extremum with a square window of radius r. */
 function rankFilter( src, W, H, r, pick ) {
 	const tmp = new Float32Array( src.length );
@@ -610,35 +663,47 @@ export function analyzeImage( { width: W, height: H, pixels, K, seed } ) {
 	}
 	mark( 'scale' );
 
-	/* Masking fluid: small whites next to edges stay bare paper ---------- */
-	// A painter masks out white lettering and highlights before washing over
-	// them. Paper-white cells within a few cells of a strong edge are reserved.
-	const nearEdge = new Uint8Array( N );
-	const ER = Math.max( 2, Math.round( B / 260 ) );
-	for ( let y = 0; y < H; y++ ) {
-		for ( let x = 0; x < W; x++ ) {
-			if ( edge[ y * W + x ] > 0.35 ) {
-				for ( let dy = -ER; dy <= ER; dy++ ) {
-					const yy = y + dy;
-					if ( yy < 0 || yy >= H ) {
-						continue;
-					}
-					for ( let dx = -ER; dx <= ER; dx++ ) {
-						const xx = x + dx;
-						if ( xx >= 0 && xx < W ) {
-							nearEdge[ yy * W + xx ] = 1;
-						}
-					}
+	/* Masking fluid: only thin whites stay bare paper -------------------- */
+	// A painter masks out white lettering and small highlights before washing
+	// over them, never a big white shape (that is simply left unpainted).
+	// White components whose thickest point is thin are reserved.
+	const white = new Uint8Array( N );
+	for ( let i = 0; i < N; i++ ) {
+		white[ i ] = Dt[ i * 3 ] + Dt[ i * 3 + 1 ] + Dt[ i * 3 + 2 ] < 0.12 ? 1 : 0;
+	}
+	const wDepth = chamferInside( white, W, H );
+	const thinMax = Math.max( 2.5, B * 0.02 );
+	const reserve = new Uint8Array( N );
+	const wSeen = new Uint8Array( N );
+	const wStack = new Int32Array( N );
+	let reserved = 0;
+	for ( let s0 = 0; s0 < N; s0++ ) {
+		if ( ! white[ s0 ] || wSeen[ s0 ] ) {
+			continue;
+		}
+		let sp = 0;
+		wStack[ sp++ ] = s0;
+		wSeen[ s0 ] = 1;
+		const comp = [];
+		let thickest = 0;
+		while ( sp > 0 ) {
+			const c = wStack[ --sp ];
+			comp.push( c );
+			thickest = Math.max( thickest, wDepth[ c ] );
+			const x = c % W;
+			const y = ( c / W ) | 0;
+			for ( const n of [ x > 0 ? c - 1 : -1, x < W - 1 ? c + 1 : -1, y > 0 ? c - W : -1, y < H - 1 ? c + W : -1 ] ) {
+				if ( n >= 0 && white[ n ] && ! wSeen[ n ] ) {
+					wSeen[ n ] = 1;
+					wStack[ sp++ ] = n;
 				}
 			}
 		}
-	}
-	const reserve = new Uint8Array( N );
-	let reserved = 0;
-	for ( let i = 0; i < N; i++ ) {
-		if ( nearEdge[ i ] && Dt[ i * 3 ] + Dt[ i * 3 + 1 ] + Dt[ i * 3 + 2 ] < 0.12 ) {
-			reserve[ i ] = 1;
-			reserved++;
+		if ( thickest <= thinMax && comp.length < N * 0.02 ) {
+			for ( const c of comp ) {
+				reserve[ c ] = 1;
+			}
+			reserved += comp.length;
 		}
 	}
 	mark( 'reserve' );

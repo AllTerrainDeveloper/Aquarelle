@@ -44,6 +44,7 @@ export class AnimationController {
 	reset() {
 		this.model.reset();
 		this.animator.reset();
+		this.splash._washes = null;
 		this.simTime = 0;
 		this.target = 0;
 		this.cursor = 0;
