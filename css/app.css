@@ -249,6 +249,40 @@ button.attention {
 	position: relative;
 }
 
+.swatch {
+	padding: 0;
+	cursor: pointer;
+}
+
+.swatch:disabled {
+	cursor: default;
+	opacity: 1;
+}
+
+.swatch.target {
+	outline: 2px solid var(--accent);
+	outline-offset: 2px;
+}
+
+.swatch.mapped {
+	box-shadow: inset 0 0 0 2px var(--panel);
+}
+
+.swatch.excluded {
+	opacity: 0.35;
+}
+
+.swatch.excluded::before {
+	content: "";
+	position: absolute;
+	left: 50%;
+	top: -2px;
+	bottom: -2px;
+	width: 2px;
+	background: var(--ink);
+	transform: rotate( 45deg );
+}
+
 .swatch.paper::after {
 	content: "";
 	position: absolute;

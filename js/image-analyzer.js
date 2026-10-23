@@ -334,7 +334,7 @@ export function pixelsToLabLinear( pixels, n ) {
 	return { lin, lab };
 }
 
-export function analyzeImage( { width: W, height: H, pixels, K, seed } ) {
+export function analyzeImage( { width: W, height: H, pixels, K: K0, seed, exclude = [], remap = [] } ) {
 	const times = {};
 	let t = performance.now();
 	const mark = ( name ) => {
@@ -403,10 +403,10 @@ export function analyzeImage( { width: W, height: H, pixels, K, seed } ) {
 	mark( 'importance' );
 
 	/* Palette ------------------------------------------------------- */
-	const centers = kmeans( lab, N, K, rng );
+	const centers = kmeans( lab, N, K0, rng );
 	centers.sort( ( a, b ) => b[ 0 ] - a[ 0 ] );
 	const tmp = [ 0, 0, 0 ];
-	const pigments = centers.map( ( c ) => {
+	const all = centers.map( ( c ) => {
 		oklabToLinear( c[ 0 ], c[ 1 ], c[ 2 ], tmp );
 		const linC = tmp.map( ( v ) => Math.max( 0, Math.min( 1, v ) ) );
 		const A = linC.map( ( v, ch ) => -Math.log( Math.min( 0.999, Math.max( 0.03, v / PAPER_LINEAR[ ch ] ) ) ) );
@@ -414,6 +414,49 @@ export function analyzeImage( { width: W, height: H, pixels, K, seed } ) {
 		const strength = Math.max( A[ 0 ], A[ 1 ], A[ 2 ] );
 		return { lab: c, srgb, hex: toHex( srgb ), A, L: c[ 0 ], isPaper: strength < 0.06 };
 	} );
+	// Colours the user dragged onto another: wherever the image uses colour A
+	// it now uses colour B, keeping its light and shade (shift in OKLab).
+	const mapTo = new Map( remap.filter( ( [ a, b ] ) => a !== b && all[ a ] && all[ b ] ) );
+	if ( mapTo.size ) {
+		for ( let i = 0; i < N; i++ ) {
+			let best = 0;
+			let bd = Infinity;
+			for ( let c = 0; c < all.length; c++ ) {
+				const dl = lab[ i * 3 ] - all[ c ].lab[ 0 ];
+				const da = lab[ i * 3 + 1 ] - all[ c ].lab[ 1 ];
+				const db = lab[ i * 3 + 2 ] - all[ c ].lab[ 2 ];
+				const d = dl * dl + da * da + db * db;
+				if ( d < bd ) {
+					bd = d;
+					best = c;
+				}
+			}
+			const to = mapTo.get( best );
+			if ( undefined === to ) {
+				continue;
+			}
+			for ( let ch = 0; ch < 3; ch++ ) {
+				lab[ i * 3 + ch ] += all[ to ].lab[ ch ] - all[ best ].lab[ ch ];
+			}
+			oklabToLinear( lab[ i * 3 ], lab[ i * 3 + 1 ], lab[ i * 3 + 2 ], tmp );
+			for ( let ch = 0; ch < 3; ch++ ) {
+				lin[ i * 3 + ch ] = Math.max( 0, Math.min( 1, tmp[ ch ] ) );
+			}
+		}
+	}
+	// Colours the user took off the palette (or transformed into another):
+	// the painter mixes those areas from the remaining pigments instead.
+	let pigments = all.filter( ( p, i ) => ! exclude.includes( i ) && ! mapTo.has( i ) );
+	if ( ! pigments.some( ( p ) => ! p.isPaper ) ) {
+		pigments = all;
+	}
+	const K = pigments.length;
+	const palette = all.map( ( p, i ) => ( {
+		hex: p.hex,
+		isPaper: p.isPaper,
+		excluded: ! pigments.includes( p ) && ! mapTo.has( i ),
+		mappedTo: mapTo.has( i ) ? mapTo.get( i ) : -1,
+	} ) );
 	mark( 'palette' );
 
 	/* Per-pixel pigment decomposition (NNLS over pairs) -------------- */
@@ -777,6 +820,7 @@ export function analyzeImage( { width: W, height: H, pixels, K, seed } ) {
 		H,
 		B,
 		K,
+		palette,
 		lab,
 		pigments,
 		T: [ T0, T1, T2 ],

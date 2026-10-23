@@ -28,6 +28,8 @@ self.onmessage = ( e ) => {
 					pixels: new Uint8ClampedArray( msg.pixels ),
 					K: msg.K,
 					seed: msg.seed,
+					exclude: msg.exclude || [],
+					remap: msg.remap || [],
 				} );
 				const t1 = performance.now();
 				const plan = planComposition( an, { duration: msg.duration, seed: msg.seed, fineDetail: msg.detail } );

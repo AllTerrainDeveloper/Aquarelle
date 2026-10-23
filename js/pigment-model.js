@@ -449,6 +449,17 @@ export class PigmentModel {
 				// must not make its leading edge think the job is already done.
 				tone = b.amount * Math.max( 0, this.T[ b.level ][ k ][ ci ] - this.d[ k ][ ci ] );
 			}
+			// Stroke direction here (for bristle streaks across it).
+			const jp = Math.max( 0, j - 4 );
+			const jn = Math.min( P.length - 4, j + 4 );
+			let ux = P[ jn ] - P[ jp ];
+			let uy = P[ jn + 1 ] - P[ jp + 1 ];
+			const ul = Math.hypot( ux, uy ) || 1;
+			ux /= ul;
+			uy /= ul;
+			// The brush unloads as it goes: a little lighter toward the end.
+			const load = 1 - ( b.unload ?? 0.2 ) * sj;
+			const dry = b.water < 0.25;
 			const xa = Math.max( b.bx0, Math.floor( cx - ext ) );
 			const xb = Math.min( b.bx0 + b.bw - 1, Math.ceil( cx + ext ) );
 			const ya = Math.max( b.by0, Math.floor( cy - ext ) );
@@ -496,8 +507,17 @@ export class PigmentModel {
 					if ( b.shared ) {
 						b.shared[ i ] = cover;
 					}
+					// Bristle streaks: a texture that depends only on the position
+					// across the stroke, so it runs along the stroke's direction.
+					const across = ( ( x - cx ) * -uy + ( y - cy ) * ux ) / tr;
+					const bristle = valueNoise( across * 4.5 + 7.3, 0.5, seed ^ 0x2c1b );
+					let streak = 0.82 + 0.36 * bristle;
+					// Near-dry strokes skip on the paper's tooth (dry-brush breaks).
+					if ( dry && bristle < 0.28 && this.paper[ i ] > 0.5 ) {
+						streak *= 0.25;
+					}
 					if ( gk ) {
-						const add = tone * ( 0.9 + 0.2 * n ) * ( cover - had );
+						const add = tone * load * streak * ( 0.92 + 0.16 * n ) * ( cover - had );
 						gk[ i ] += add;
 						total += add;
 					}

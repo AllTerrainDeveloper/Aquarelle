@@ -367,7 +367,10 @@ export class SplashGenerator {
 			seed: rng.u32(),
 			path,
 			shared: op.shared,
-			graded: op.graded,
+			// Detail strokes also grade their tone along the path (a brow dark at
+			// its root, lighter at its tip); washes unload a little less.
+			graded: op.graded || 'detail' === op.type,
+			unload: 'sweep' === op.type ? 0.15 : 0.3,
 		};
 		const B = this.an.B;
 		const tip = op.r ?? 1.5;

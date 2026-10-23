@@ -14,6 +14,12 @@ Static site, no build step and no dependencies: serve the folder and open
 python3 -m http.server 8765
 ```
 
+**Palette editing:** after analysis, click a colour in the palette to remove
+it (the painter mixes that area from the remaining pigments), or drag a
+colour onto another to paint it as that colour (a recolour in OKLab that
+keeps the image's light and shade). Click a removed or transformed colour to
+restore it.
+
 URL options: `?sample=portrait|landscape|lowcolor|detailed|contrast|lettering`
 loads a built-in test image; `?instant=1` (QA) applies paint without the
 animated hand; `?bench=1&benchSpeed=16&benchRt=20` runs the benchmark

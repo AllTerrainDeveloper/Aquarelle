@@ -626,7 +626,8 @@ export function sweepStrokes( cells, W, w, seam, o, maxSamples = 260 ) {
 				// The row wavers a little, as a hand does.
 				const wy = ly + Math.sin( ( lx + x0 ) * wave + phase + row ) * w * 0.22;
 				const li = at( lx, wy );
-				const r = strong( lx, wy ) ? Math.min( w, depth[ li ] + seam * 0.5 ) : w;
+				// The tip never reaches past the (already expanded) shape.
+				const r = Math.min( w, depth[ li ] + seam * 0.5 );
 				lastX = lx + x0 - 1;
 				lastY = wy + y0 - 1;
 				raw.push( lastX, lastY, Math.max( 0.8, r ) );
@@ -806,8 +807,14 @@ export function planComposition( an, { duration, seed, density = 1, fineDetail =
 			// small unassigned bits), never under earlier ones or into whites.
 			const pos = orderPos[ o ];
 			const margin = Math.max( 3, w * 1.2 );
+			let dark = 0;
+			for ( const i of own ) {
+				dark += darkness[ i ];
+			}
+			dark /= own.length;
 			const extra = expandCells( own, W, H, margin, ( i ) => {
-				if ( whiteish( i ) ) {
+				// Never spill into a clearly lighter area (that reads as a dark halo).
+				if ( whiteish( i ) || darkness[ i ] < dark - 0.08 ) {
 					return false;
 				}
 				const other = objOf[ i ];
@@ -848,7 +855,8 @@ export function planComposition( an, { duration, seed, density = 1, fineDetail =
 				wash: item.o,
 				level: 1,
 				amount: 0.8,
-				water: rng.range( 0.5, 0.7 ),
+				// Darks are mixed richer and drier, lights wetter.
+				water: ( 0.3 + 0.4 * pigments[ main ].L ) * rng.range( 0.9, 1.1 ),
 				chaos: 0.1,
 				stage,
 				t: tc,

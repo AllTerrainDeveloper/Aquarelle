@@ -56,6 +56,10 @@ const paperReady = call( 'paper', { size: PAPER_SIZE, seed: 7 } ).then( ( { tex 
 } );
 
 let source = null;
+// Palette colours the user removed, and colours dragged onto another
+// (from -> to), as indices into the analysed palette.
+const excluded = new Set();
+const remap = new Map();
 let sourceName = 'image';
 let session = null;
 let doneResolve = null;
@@ -183,6 +187,8 @@ window.addEventListener( 'resize', layout );
 
 /* Source loading ------------------------------------------------------------- */
 function loadSource( img, name ) {
+	excluded.clear();
+	remap.clear();
 	source = img;
 	sourceName = name;
 	const [ sw, sh ] = srcSize( img );
@@ -272,7 +278,7 @@ async function analyze() {
 	const t0 = performance.now();
 	let r;
 	try {
-		r = await call( 'analyze', { width: W, height: H, pixels: pixels.buffer, refW, refH, refPixels: refPixels.buffer, K, seed, duration, detail: { strokes: detailLevel().strokes, fine: detailLevel().fine } }, [
+		r = await call( 'analyze', { width: W, height: H, pixels: pixels.buffer, refW, refH, refPixels: refPixels.buffer, K, seed, duration, exclude: [ ...excluded ], remap: [ ...remap ], detail: { strokes: detailLevel().strokes, fine: detailLevel().fine } }, [
 			pixels.buffer,
 			refPixels.buffer,
 		] );
@@ -300,14 +306,65 @@ async function analyze() {
 	animation.setError( r.baseline );
 	layout();
 
+	// Palette: click a colour to take it off (the painter mixes that area from
+	// the remaining pigments); drag a colour onto another to turn it into that
+	// one; click a removed or transformed colour to restore it.
 	$( 'swatches' ).innerHTML = '';
-	for ( const p of an.pigments ) {
-		const d = document.createElement( 'span' );
-		d.className = 'swatch' + ( p.isPaper ? ' paper' : '' );
-		d.style.background = p.hex;
-		d.title = p.isPaper ? `${ p.hex } — left as bare paper` : p.hex;
+	an.palette.forEach( ( p, idx ) => {
+		const d = document.createElement( 'button' );
+		d.type = 'button';
+		const mapped = p.mappedTo >= 0 ? an.palette[ p.mappedTo ] : null;
+		d.className = 'swatch' + ( p.isPaper ? ' paper' : '' ) + ( p.excluded ? ' excluded' : '' ) + ( mapped ? ' mapped' : '' );
+		d.style.background = mapped ? `linear-gradient(135deg, ${ p.hex } 0 45%, ${ mapped.hex } 55% 100%)` : p.hex;
+		d.title = mapped
+			? `${ p.hex } → painted as ${ mapped.hex } (click to restore)`
+			: p.excluded
+			? `${ p.hex } — removed (click to allow it again)`
+			: p.isPaper
+			? `${ p.hex } — left as bare paper`
+			: `${ p.hex } — click to remove, or drag onto another colour to turn it into that one`;
+		d.setAttribute( 'aria-label', d.title );
+		d.disabled = p.isPaper;
+		d.draggable = ! p.isPaper && ! p.excluded && ! mapped;
+		d.addEventListener( 'click', () => {
+			if ( remap.has( idx ) ) {
+				remap.delete( idx );
+			} else if ( excluded.has( idx ) ) {
+				excluded.delete( idx );
+			} else {
+				excluded.add( idx );
+			}
+			analyze();
+		} );
+		d.addEventListener( 'dragstart', ( e ) => {
+			e.dataTransfer.setData( 'text/plain', String( idx ) );
+			e.dataTransfer.effectAllowed = 'move';
+		} );
+		d.addEventListener( 'dragover', ( e ) => {
+			if ( ! p.excluded && ! mapped ) {
+				e.preventDefault();
+				d.classList.add( 'target' );
+			}
+		} );
+		d.addEventListener( 'dragleave', () => d.classList.remove( 'target' ) );
+		d.addEventListener( 'drop', ( e ) => {
+			e.preventDefault();
+			d.classList.remove( 'target' );
+			const from = Number( e.dataTransfer.getData( 'text/plain' ) );
+			if ( Number.isInteger( from ) && from !== idx ) {
+				// Anything already turned into `from` now follows it to `idx`.
+				for ( const [ a, b ] of remap ) {
+					if ( b === from ) {
+						remap.set( a, idx );
+					}
+				}
+				remap.set( from, idx );
+				excluded.delete( from );
+				analyze();
+			}
+		} );
 		$( 'swatches' ).appendChild( d );
-	}
+	} );
 	const types = Object.entries( r.plan.byType )
 		.map( ( [ k, v ] ) => `${ v } ${ k }` )
 		.join( ' · ' );
@@ -328,6 +385,9 @@ async function analyze() {
 $( 'analyze' ).addEventListener( 'click', analyze );
 $( 'pigments' ).addEventListener( 'input', ( e ) => {
 	$( 'pigOut' ).textContent = e.target.value;
+	// A different palette size gives different colours: start with all allowed.
+	excluded.clear();
+	remap.clear();
 	if ( session ) {
 		$( 'analyze' ).classList.add( 'attention' );
 	}
