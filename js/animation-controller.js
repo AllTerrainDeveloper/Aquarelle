@@ -274,8 +274,13 @@ export class AnimationController {
 				// Silhouettes are where blind corrections do the most harm:
 				// a border that is slightly off reads better than one reworked.
 				const edgeCalm = 1 - 0.75 * this.an.edge[ i ];
-				// Ignore errors that are already within a perceptual tolerance.
-				const e = Math.max( 0, err[ b ] - 3.5 );
+				// Ignore errors that are already within a perceptual tolerance, and
+				// the border Cinematic leaves unpainted on purpose.
+				const border = this.splash?.border && this.splash.border.room( bx * 2, by * 2 ) < 0;
+				if ( border && signed ) {
+					signed[ b ] = 0;
+				}
+				const e = border ? 0 : Math.max( 0, err[ b ] - 3.5 );
 				weight[ b ] = e * e * wetPenalty * edgeCalm;
 				acc += weight[ b ];
 				cdf[ b ] = acc;

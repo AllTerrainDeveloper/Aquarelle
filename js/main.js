@@ -6,7 +6,7 @@
 import { PAPER_LINEAR } from './color.js';
 import { WatercolorRenderer } from './watercolor-renderer.js';
 import { PigmentModel } from './pigment-model.js';
-import { SplashGenerator } from './splash-generator.js';
+import { SplashGenerator, makeBorder } from './splash-generator.js';
 import { DryingModel } from './drying-model.js';
 import { AdaptiveController } from './adaptive-controller.js';
 import { AnimationController } from './animation-controller.js';
@@ -114,8 +114,13 @@ const DETAIL = [
 ];
 const detailLevel = () => DETAIL[ Number( $( 'detail' ).value ) ] || DETAIL[ 1 ];
 
+// Cinematic's high resolution: a finer grid (up to this many cells on the
+// long side), so paint stays crisp when the camera moves in close.
+const HIRES_MAX = 960;
+
 function simResolution() {
-	return detailLevel().res;
+	const res = detailLevel().res;
+	return 'cinematic' === tab && $( 'hires' ).checked ? Math.max( res, Math.min( 2 * res, HIRES_MAX ) ) : res;
 }
 
 /** Paper height at simulation resolution, matching the renderer's mapping. */
@@ -329,7 +334,7 @@ async function analyze() {
 	splash.animator = params.get( 'instant' ) ? null : animator;
 	animation.overlay = $( 'overlay' ).getContext( '2d' );
 	renderer.setup( W, H );
-	session = { an, plan: r.plan, model, drying, splash, animator, baseline: r.baseline, timings: r.timings, wall, W, H, refW, refH, seed, K, duration };
+	session = { an, plan: r.plan, model, drying, splash, animator, baseline: r.baseline, timings: r.timings, wall, W, H, refW, refH, seed, K, duration, res };
 	finalScores = null;
 	animation.load( { analysis: an, plan: r.plan, model, splash, drying, animator } );
 	animation.setError( r.baseline );
@@ -528,6 +533,11 @@ function selectTab( name, focus ) {
 		localStorage.setItem( 'aquarelle-tab', name );
 	} catch ( err ) {}
 	syncCinematic();
+	// Cinematic in high resolution paints on a finer grid (and back).
+	// (A finished painting stays on show until Paint is pressed.)
+	if ( session && session.res !== simResolution() && ( 'ready' === animation.state || 'idle' === animation.state ) ) {
+		reanalyze();
+	}
 }
 
 /**
@@ -571,6 +581,15 @@ $( 'untilSim' ).addEventListener( 'change', ( e ) => {
 		localStorage.setItem( 'aquarelle-until-sim', e.target.checked ? '1' : '' );
 	} catch ( err ) {}
 } );
+try {
+	$( 'hires' ).checked = '1' === localStorage.getItem( 'aquarelle-hires' );
+} catch ( err ) {}
+$( 'hires' ).addEventListener( 'change', ( e ) => {
+	try {
+		localStorage.setItem( 'aquarelle-hires', e.target.checked ? '1' : '' );
+	} catch ( err ) {}
+	reanalyze();
+} );
 $( 'simTarget' ).addEventListener( 'change', ( e ) => {
 	e.target.value = simTarget();
 	try {
@@ -595,13 +614,19 @@ function tabMode() {
  * The Paint button: pauses and resumes a painting in progress; otherwise
  * starts the selected tab's mode (fresh if the mode changed).
  */
-function play() {
+async function play() {
 	if ( ! session ) {
 		return;
 	}
-	const st = animation.state;
+	let st = animation.state;
 	const { mode, endless, target = 0 } = tabMode();
-	const same = mode === animation.mode && endless === animation.endless && target === animation.targetSim;
+	let same = mode === animation.mode && endless === animation.endless && target === animation.targetSim;
+	if ( 'painting' !== st && ! ( 'paused' === st && same ) && session.res !== simResolution() ) {
+		// A fresh start on a different grid (Cinematic's high resolution).
+		await analyze();
+		st = animation.state;
+		same = false;
+	}
 	if ( 'painting' === st ) {
 		animation.pause();
 	} else if ( 'paused' === st && same ) {
@@ -611,6 +636,8 @@ function play() {
 			restart();
 		}
 		animation.setMode( mode, QUICK_SECONDS, endless, target );
+		// Cinematic leaves a clean border around the sheet, as a careful painter does.
+		session.splash.border = 'cinematic' === mode ? makeBorder( session.W, session.H, session.seed ) : null;
 		syncCinematic();
 		director.reset();
 		animation.start();

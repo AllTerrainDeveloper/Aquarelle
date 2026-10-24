@@ -49,6 +49,12 @@ tabs, then press **Paint** (it also pauses and resumes):
   reused, the brush's shadow is drawn only around the brush, and a slow
   frame never cuts the camera back to the wide shot nor sends the brush
   back from the palette before it has loaded.
+  Like a careful painter, the brush lifts short of the sheet's edges,
+  leaving a clean border whose width wanders along each edge and from
+  stroke to stroke (refinement leaves it alone too). *High resolution*
+  paints on a grid twice as fine (up to 960 cells on the long side), so
+  paint stays crisp when the camera moves in close; it needs a faster
+  computer.
   *Keep painting until similarity reaches* (85% by default): after the
   painting, Cinematic keeps refining the weakest areas, as Endless does,
   until the similarity score reaches the target; it also stops if nothing

@@ -23,6 +23,36 @@ const CINE_APPROACH = 0.4;
 // from fine marks (size 0) to broad washes (size 1).
 const handSpeed = ( B, size ) => B * ( 0.08 + 0.22 * size );
 
+/**
+ * Cinematic: the clean border a careful painter leaves around the sheet. Along
+ * each edge the margin wanders (between about 1% and 3.5% of the sheet's long
+ * side), as a hand stops short of the edge by eye rather than by ruler.
+ * `room( x, y )` is how far (cells) a point lies inside it; negative in the border.
+ */
+export function makeBorder( W, H, seed ) {
+	const rng = new Rng( ( seed ^ 0x5bd1e995 ) >>> 0 );
+	const B = Math.max( W, H );
+	const maxM = 0.035 * B;
+	const edge = () => {
+		const f = [ rng.range( 2, 4 ), rng.range( 5, 9 ), rng.range( 11, 17 ) ];
+		const ph = [ rng.range( 0, 6.3 ), rng.range( 0, 6.3 ), rng.range( 0, 6.3 ) ];
+		// u: 0–1 along the edge -> margin (cells).
+		return ( u ) => {
+			const n = 0.55 * Math.sin( u * f[ 0 ] + ph[ 0 ] ) + 0.3 * Math.sin( u * f[ 1 ] + ph[ 1 ] ) + 0.15 * Math.sin( u * f[ 2 ] + ph[ 2 ] );
+			return maxM * ( 0.62 + 0.38 * n );
+		};
+	};
+	const left = edge();
+	const right = edge();
+	const top = edge();
+	const bottom = edge();
+	return {
+		room( x, y, scale = 1 ) {
+			return Math.min( x - left( y / H ) * scale, W - x - right( y / H ) * scale, y - top( x / W ) * scale, H - y - bottom( x / W ) * scale );
+		},
+	};
+}
+
 export class SplashGenerator {
 	constructor( model, analysis, drying ) {
 		this.model = model;
@@ -260,6 +290,7 @@ export class SplashGenerator {
 		// only touches paper where there is room for it; near a border the brush
 		// lifts instead of crossing (nothing is trimmed afterwards).
 		const keepIn = contour ? 0.45 : 0.8;
+		const stopAt = this.border ? rng.range( 0.75, 1.25 ) : 1;
 		const M = Math.max( 6, Math.ceil( ( passes * 2 * R ) / Math.max( 0.6, tip * 0.5 ) ) );
 		const path = new Float32Array( M * 4 );
 		const shape = { x, y, R, passes, dx, dy };
@@ -278,7 +309,10 @@ export class SplashGenerator {
 			// Contour strokes are meant to sit on the edge: they only need the
 			// colour to belong there (their tip is sized to the shape).
 			const roomy = contour || extra.fitR || this.roomAt( pt.x, pt.y ) >= tr * keepIn;
-			const ok = inside && roomy && ( k < 0 || extra.trust || this.belongs( k, pt.x, pt.y ) );
+			// Cinematic: the brush lifts before the border, each stroke stopping
+			// a little nearer or farther.
+			const clear = ! this.border || this.border.room( pt.x, pt.y, stopAt ) >= tr * 0.6;
+			const ok = inside && roomy && clear && ( k < 0 || extra.trust || this.belongs( k, pt.x, pt.y ) );
 			path[ j * 4 + 3 ] = ok ? tr : 0;
 		}
 		// No dabs: a touch shorter than a few tip-widths would leave a dot, so
@@ -393,6 +427,7 @@ export class SplashGenerator {
 		}
 		const path = new Float32Array( n * 4 );
 		const track = new Float32Array( n * 3 );
+		const stopAt = this.border ? rng.range( 0.75, 1.25 ) : 1;
 		for ( let q = 0; q < n; q++ ) {
 			const x = pts[ q * 3 ];
 			const y = pts[ q * 3 + 1 ];
@@ -402,7 +437,7 @@ export class SplashGenerator {
 			// A gentle taper only at the very ends of a stroke.
 			const press = 0.88 + 0.12 * Math.min( 1, u / 0.06, ( 1 - u ) / 0.06 );
 			// Object sweeps were planned to run under later neighbours on purpose.
-			const ok = op.trust || k < 0 || this.belongs( k, x, y );
+			const ok = ( op.trust || k < 0 || this.belongs( k, x, y ) ) && ( ! this.border || this.border.room( x, y, stopAt ) >= pts[ q * 3 + 2 ] * 0.6 );
 			path[ q * 4 ] = x;
 			path[ q * 4 + 1 ] = y;
 			path[ q * 4 + 2 ] = Math.min( 0.9999, s );
@@ -411,11 +446,29 @@ export class SplashGenerator {
 			track[ q * 3 + 1 ] = y;
 			track[ q * 3 + 2 ] = s;
 		}
+		// Cinematic, with its border: the hand brushes only from the first touch
+		// to the last (it lifts before the border rather than sweeping on).
+		let q0 = 0;
+		let q1 = n - 1;
+		if ( this.border && anim && anim.cinematic ) {
+			while ( q0 < n && ! path[ q0 * 4 + 3 ] ) {
+				q0++;
+			}
+			if ( q0 >= n ) {
+				return null;
+			}
+			while ( q1 > q0 && ! path[ q1 * 4 + 3 ] ) {
+				q1--;
+			}
+		}
+		const p0 = path[ q0 * 4 + 2 ];
+		const p1 = q1 === n - 1 ? 1 : path[ q1 * 4 + 2 ];
+		const trimmed = q0 > 0 || q1 < n - 1;
 		if ( k >= 0 ) {
 			this.loaded = k;
 		}
-		this.handX = pts[ ( n - 1 ) * 3 ];
-		this.handY = pts[ ( n - 1 ) * 3 + 1 ];
+		this.handX = pts[ q1 * 3 ];
+		this.handY = pts[ q1 * 3 + 1 ];
 		const blob = {
 			brush: true,
 			k,
@@ -442,11 +495,14 @@ export class SplashGenerator {
 		}
 		// Cinematic: the brush is seen coming down onto the paper and lifting off.
 		const approach = anim && anim.cinematic ? CINE_APPROACH : 0.08 + 0.14 * Math.min( 1, tip / ( B * 0.025 ) );
-		const start = anim ? anim.nextBrush( this.now + delay, approach, k, pts[ 0 ], pts[ 1 ] ) : 0;
+		if ( trimmed ) {
+			dur = Math.max( 0.3, dur * ( p1 - p0 ) );
+		}
+		const start = anim ? anim.nextBrush( this.now + delay, approach, k, pts[ q0 * 3 ], pts[ q0 * 3 + 1 ] ) : 0;
 		if ( anim ) {
 			anim.brushFreeAt = start + dur + approach;
 		}
-		this._emit( blob, { tool: 'brush', mode: 'sweep', start, dur, approach, linger: approach, x: pts[ 0 ], y: pts[ 1 ], tip, track } );
+		this._emit( blob, { tool: 'brush', mode: 'sweep', start, dur, approach, linger: approach, x: pts[ q0 * 3 ], y: pts[ q0 * 3 + 1 ], tip, track, ...( trimmed ? { p0, p1 } : {} ) } );
 		return { start, dur };
 	}
 

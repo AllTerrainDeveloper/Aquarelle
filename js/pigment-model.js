@@ -1104,6 +1104,8 @@ export class PigmentModel {
 	/** Recompute optical density for changed tiles; tracks dirty rows. */
 	updateComposite() {
 		const { W, H, TX, K, A, comp, h } = this;
+		const D = this.d;
+		const G = this.g;
 		for ( let t = 0; t < this.NT; t++ ) {
 			if ( ! this.tileComp[ t ] ) {
 				continue;
@@ -1119,25 +1121,31 @@ export class PigmentModel {
 			if ( ye - 1 > this.dirtyY1 ) {
 				this.dirtyY1 = ye - 1;
 			}
+			// Pigment by pigment over each row (one pass per layer, in memory
+			// order), rather than every pigment for every cell.
 			for ( let y = ys; y < ye; y++ ) {
-				const row = y * W;
-				for ( let x = xs; x < xe; x++ ) {
-					const i = row + x;
-					let r = 0;
-					let g = 0;
-					let b = 0;
-					for ( let k = 0; k < K; k++ ) {
-						const v = this.d[ k ][ i ] + this.g[ k ][ i ];
+				const i0 = y * W + xs;
+				const i1 = y * W + xe;
+				for ( let i = i0; i < i1; i++ ) {
+					comp[ i * 4 ] = 0;
+					comp[ i * 4 + 1 ] = 0;
+					comp[ i * 4 + 2 ] = 0;
+					comp[ i * 4 + 3 ] = h[ i ];
+				}
+				for ( let k = 0; k < K; k++ ) {
+					const dk = D[ k ];
+					const gk = G[ k ];
+					const ar = A[ k * 3 ];
+					const ag = A[ k * 3 + 1 ];
+					const ab = A[ k * 3 + 2 ];
+					for ( let i = i0; i < i1; i++ ) {
+						const v = dk[ i ] + gk[ i ];
 						if ( v > 0 ) {
-							r += v * A[ k * 3 ];
-							g += v * A[ k * 3 + 1 ];
-							b += v * A[ k * 3 + 2 ];
+							comp[ i * 4 ] += v * ar;
+							comp[ i * 4 + 1 ] += v * ag;
+							comp[ i * 4 + 2 ] += v * ab;
 						}
 					}
-					comp[ i * 4 ] = r;
-					comp[ i * 4 + 1 ] = g;
-					comp[ i * 4 + 2 ] = b;
-					comp[ i * 4 + 3 ] = h[ i ];
 				}
 			}
 		}
