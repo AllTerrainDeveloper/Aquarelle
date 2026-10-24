@@ -206,6 +206,11 @@ export class WatercolorRenderer {
 		gl.texParameteri( gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR );
 		gl.texParameteri( gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE );
 		gl.texParameteri( gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE );
+		// Uploading floats into half floats has the browser convert every value
+		// (about 5x the cost of the upload itself). Where the GPU can, the field
+		// goes up as it is into a full-float staging texture, and the GPU copies
+		// the changed parts across, converting as it goes.
+		this._setupStaging( W, H );
 		if ( this.errTex ) {
 			gl.deleteTexture( this.errTex );
 		}
@@ -220,18 +225,68 @@ export class WatercolorRenderer {
 		this.needsDraw = true;
 	}
 
-	/** Uploads only the rows of the density field that changed. */
+	_setupStaging( W, H ) {
+		const gl = this.gl;
+		if ( this.stage ) {
+			gl.deleteTexture( this.stage.tex );
+			gl.deleteFramebuffer( this.stage.read );
+			gl.deleteFramebuffer( this.stage.draw );
+			this.stage = null;
+		}
+		if ( false === this.canStage || ! gl.getExtension( 'EXT_color_buffer_float' ) ) {
+			this.canStage = false;
+			return;
+		}
+		const tex = gl.createTexture();
+		gl.bindTexture( gl.TEXTURE_2D, tex );
+		gl.texImage2D( gl.TEXTURE_2D, 0, gl.RGBA32F, W, H, 0, gl.RGBA, gl.FLOAT, null );
+		gl.texParameteri( gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST );
+		gl.texParameteri( gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST );
+		const read = gl.createFramebuffer();
+		gl.bindFramebuffer( gl.READ_FRAMEBUFFER, read );
+		gl.framebufferTexture2D( gl.READ_FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0 );
+		const draw = gl.createFramebuffer();
+		gl.bindFramebuffer( gl.DRAW_FRAMEBUFFER, draw );
+		gl.framebufferTexture2D( gl.DRAW_FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, this.densTex, 0 );
+		const ok = gl.checkFramebufferStatus( gl.READ_FRAMEBUFFER ) === gl.FRAMEBUFFER_COMPLETE && gl.checkFramebufferStatus( gl.DRAW_FRAMEBUFFER ) === gl.FRAMEBUFFER_COMPLETE;
+		gl.bindFramebuffer( gl.FRAMEBUFFER, null );
+		if ( ! ok ) {
+			gl.deleteTexture( tex );
+			gl.deleteFramebuffer( read );
+			gl.deleteFramebuffer( draw );
+			this.canStage = false;
+			return;
+		}
+		this.stage = { tex, read, draw };
+	}
+
+	/** Uploads only the parts of the density field that changed (cells uploaded). */
 	upload( model ) {
-		const rows = model.consumeDirtyRows();
-		if ( ! rows ) {
+		const rects = model.consumeDirtyRects();
+		if ( ! rects.length ) {
 			return 0;
 		}
 		const gl = this.gl;
-		const [ y0, y1 ] = rows;
-		gl.bindTexture( gl.TEXTURE_2D, this.densTex );
-		gl.texSubImage2D( gl.TEXTURE_2D, 0, 0, y0, this.W, y1 - y0 + 1, gl.RGBA, gl.FLOAT, model.comp, y0 * this.W * 4 );
+		const st = this.stage;
+		gl.bindTexture( gl.TEXTURE_2D, st ? st.tex : this.densTex );
+		// Each rectangle is read straight out of the full-width field.
+		gl.pixelStorei( gl.UNPACK_ROW_LENGTH, this.W );
+		let n = 0;
+		for ( const r of rects ) {
+			gl.texSubImage2D( gl.TEXTURE_2D, 0, r.x, r.y, r.w, r.h, gl.RGBA, gl.FLOAT, model.comp, ( r.y * this.W + r.x ) * 4 );
+			n += r.w * r.h;
+		}
+		gl.pixelStorei( gl.UNPACK_ROW_LENGTH, 0 );
+		if ( st ) {
+			gl.bindFramebuffer( gl.READ_FRAMEBUFFER, st.read );
+			gl.bindFramebuffer( gl.DRAW_FRAMEBUFFER, st.draw );
+			for ( const r of rects ) {
+				gl.blitFramebuffer( r.x, r.y, r.x + r.w, r.y + r.h, r.x, r.y, r.x + r.w, r.y + r.h, gl.COLOR_BUFFER_BIT, gl.NEAREST );
+			}
+			gl.bindFramebuffer( gl.FRAMEBUFFER, null );
+		}
 		this.needsDraw = true;
-		return y1 - y0 + 1;
+		return n;
 	}
 
 	uploadError( u8, w, h ) {

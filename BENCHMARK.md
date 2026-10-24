@@ -42,6 +42,23 @@ still to be recorded (see "Run it yourself").
 | Lettering, Maximum detail (800×800), 16× | analysis 450 ms; minimum 49 fps during the busiest stage |
 | Synthetic headless test (Node, 360×270) | 9,000 steps, 1.5 ms average per step |
 
+## Cinematic rendering optimisations
+
+Headless Chrome on an Apple M3 Max (Metal), 2× screen (2064×1762 canvas),
+Portrait in Cinematic with High resolution (640×800 grid), first wash. Each
+number is the median of five runs; per-frame uploads replay the same 120 real
+frames on both builds. "Before" is v17.
+
+| Optimisation | Measure | Before | After | Saved |
+|---|---|---|---|---|
+| Full floats staged, converted on the GPU | Uploading the whole sheet | 4.51 ms | 0.88 ms | −80% |
+| Only changed tiles uploaded (with the above) | Upload per frame | 0.52 ms (53,931 cells) | 0.09 ms (10,935 cells) | −83% |
+| Brush shadow drawn straight onto the frame | Whole Cinematic overlay frame (desk, brush, shadow) | 1.01 ms | 0.25 ms | −76% |
+
+The sheet's shader is unchanged (0.08 ms either way), and the picture is the
+same: the staged and direct uploads differ by at most 2/255 per channel, and the
+shadow by about 1 level on average inside it.
+
 ## Known limits
 
 - The Detailed image (a dense flower field and city windows) is the weakest: at

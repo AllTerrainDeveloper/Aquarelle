@@ -100,8 +100,9 @@ export class PigmentModel {
 		this.wetCells = 0;
 		this.activeTiles = 0;
 		this.dryZones = [];
-		this.dirtyY0 = H;
-		this.dirtyY1 = -1;
+		// Changed since the last upload: per row of tiles, the span of tiles.
+		this.rowX0 = new Int32Array( this.TY ).fill( this.TX );
+		this.rowX1 = new Int32Array( this.TY ).fill( -1 );
 	}
 
 	reset() {
@@ -1101,7 +1102,7 @@ export class PigmentModel {
 		this.wetCells = wetCells;
 	}
 
-	/** Recompute optical density for changed tiles; tracks dirty rows. */
+	/** Recompute optical density for changed tiles; tracks them for upload. */
 	updateComposite() {
 		const { W, H, TX, K, A, comp, h } = this;
 		const D = this.d;
@@ -1111,15 +1112,17 @@ export class PigmentModel {
 				continue;
 			}
 			this.tileComp[ t ] = 0;
-			const xs = ( t % TX ) * TS;
-			const ys = ( ( t / TX ) | 0 ) * TS;
+			const tx = t % TX;
+			const ty = ( t / TX ) | 0;
+			const xs = tx * TS;
+			const ys = ty * TS;
 			const xe = Math.min( W, xs + TS );
 			const ye = Math.min( H, ys + TS );
-			if ( ys < this.dirtyY0 ) {
-				this.dirtyY0 = ys;
+			if ( tx < this.rowX0[ ty ] ) {
+				this.rowX0[ ty ] = tx;
 			}
-			if ( ye - 1 > this.dirtyY1 ) {
-				this.dirtyY1 = ye - 1;
+			if ( tx > this.rowX1[ ty ] ) {
+				this.rowX1[ ty ] = tx;
 			}
 			// Pigment by pigment over each row (one pass per layer, in memory
 			// order), rather than every pigment for every cell.
@@ -1151,14 +1154,41 @@ export class PigmentModel {
 		}
 	}
 
-	consumeDirtyRows() {
-		if ( this.dirtyY1 < this.dirtyY0 ) {
-			return null;
+	/**
+	 * The parts of the composite changed since the last call, as rectangles
+	 * (cells: x, y, w, h): one per row of tiles, neighbouring rows merged when
+	 * that wastes little. Only these need uploading.
+	 */
+	consumeDirtyRects() {
+		const { W, H, TX, TY, rowX0, rowX1 } = this;
+		const rects = [];
+		let cur = null;
+		for ( let ty = 0; ty < TY; ty++ ) {
+			if ( rowX1[ ty ] < 0 ) {
+				cur = null;
+				continue;
+			}
+			const x = rowX0[ ty ] * TS;
+			const w = Math.min( W, ( rowX1[ ty ] + 1 ) * TS ) - x;
+			const y = ty * TS;
+			const h = Math.min( H, y + TS ) - y;
+			rowX0[ ty ] = TX;
+			rowX1[ ty ] = -1;
+			if ( cur ) {
+				const ux = Math.min( cur.x, x );
+				const uw = Math.max( cur.x + cur.w, x + w ) - ux;
+				if ( uw * ( cur.h + h ) <= 1.25 * ( cur.area + w * h ) ) {
+					cur.area += w * h;
+					cur.x = ux;
+					cur.w = uw;
+					cur.h += h;
+					continue;
+				}
+			}
+			cur = { x, y, w, h, area: w * h };
+			rects.push( cur );
 		}
-		const r = [ this.dirtyY0, this.dirtyY1 ];
-		this.dirtyY0 = this.H;
-		this.dirtyY1 = -1;
-		return r;
+		return rects;
 	}
 
 	/** Optical density snapshot (3 per cell) for the evaluator. */

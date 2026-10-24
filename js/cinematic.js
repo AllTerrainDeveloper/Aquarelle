@@ -24,6 +24,7 @@
 
 import { brushPath, brushPose, drawBead, drawHandle } from './gesture-animator.js';
 import { mulberry32 } from './prng.js';
+import { valueNoise } from './noise.js';
 import { Bristles } from './bristles.js';
 
 const smooth = ( a, b, x ) => {
@@ -58,6 +59,10 @@ const MAX_BIG_HAIR_PX = 120;
 // either side; and the deepest it is pressed (in hair lengths).
 const SPREAD = 0.42;
 const MAX_PRESS = 0.85;
+// Seconds over which the hand's pressure follows the brush's contact: it
+// bears down quickly and eases off slowly.
+const PRESS_EASE = 0.1;
+const RELEASE_EASE = 0.3;
 
 /** Half-width of the paint a brush blob lays at progress p (path: x, y, s, r). */
 function inkAt( path, p ) {
@@ -161,6 +166,7 @@ export class Director {
 		this.hand = null;
 		this.raw = null;
 		this.depth = 0;
+		this.bear = undefined;
 		this.corr = { x: 0, y: 0 };
 		this.lean = { x: 0, y: 0 };
 		if ( this.br ) {
@@ -169,7 +175,7 @@ export class Director {
 		this.color = CLEAN.slice();
 		this.load = 0;
 		this.water = WATER.slice();
-		this.ripples = [];
+		this.swirl = { parts: [], energy: 0, spawn: 0, at: null, rnd: mulberry32( 5 ) };
 		this.idleFor = 10;
 		this.dipSeen = null;
 		this.time = 0;
@@ -421,9 +427,7 @@ export class Director {
 				// Rinsing washes the hairs clean (the jar keeps the colour).
 				this.color = mixRgb( this.color, CLEAN, 1 - Math.exp( -dt * 5 ) );
 				this.load = Math.max( 0, this.load - dt * 2 );
-				if ( ! this.ripples.length || this.time - this.ripples[ this.ripples.length - 1 ].t > 0.14 ) {
-					this.ripples.push( { x: h.x, y: h.y, t: this.time } );
-				}
+				this._stirJar( dt, h );
 			} else if ( 'load' === T.seg && T.k >= 0 ) {
 				this.color = mixRgb( this.color, this.colors[ T.k ], 1 - Math.exp( -dt * 6 ) );
 				this.load = Math.min( 1, this.load + dt * 2 );
@@ -440,7 +444,90 @@ export class Director {
 				this.load = Math.max( 0.15, this.load - dt / 9 );
 			}
 		}
-		this.ripples = this.ripples.filter( ( r ) => this.time - r.t < 1.2 );
+		this._flowJar( dt );
+	}
+
+	/**
+	 * Rinsing stirs the jar: the brush's colour comes off in curls that the
+	 * water carries away, with pale streaks where the water moves.
+	 * Positions are in jar radii from its centre.
+	 */
+	_stirJar( dt, h ) {
+		const J = this.layout.jar;
+		const s = this.scss;
+		const pc = this.pc;
+		const bx = ( h.x * pc - J.x * s ) / ( J.r * s );
+		const by = ( h.y * pc - J.y * s ) / ( J.r * s );
+		const sw = this.swirl;
+		sw.energy = Math.min( 1, sw.energy + dt * 3 );
+		sw.at = { x: bx, y: by };
+		sw.spawn += dt * 45;
+		const rnd = sw.rnd;
+		while ( sw.spawn >= 1 && sw.parts.length < 90 ) {
+			sw.spawn--;
+			const a = rnd() * Math.PI * 2;
+			const r = 0.05 + 0.12 * rnd();
+			const pigment = rnd() < 0.7 && this.load > 0.05;
+			sw.parts.push( {
+				x: bx + Math.cos( a ) * r,
+				y: by + Math.sin( a ) * r,
+				age: 0,
+				life: 1.6 + 1.8 * rnd(),
+				w: 0.012 + 0.02 * rnd(),
+				rgb: pigment ? this.color.slice() : null,
+				a: pigment ? 0.35 + 0.35 * this.load : 0.35,
+				trail: [],
+			} );
+		}
+	}
+
+	/** The water keeps moving after the rinse: curl noise, a slowing swirl. */
+	_flowJar( dt ) {
+		const sw = this.swirl;
+		sw.energy *= Math.exp( -dt / 2 );
+		const T = this.time * 0.25;
+		const n = ( x, y ) => valueNoise( x * 2.2 + T, y * 2.2 - T * 0.7, 23 );
+		const e = 0.05;
+		for ( const p of sw.parts ) {
+			// Curl of the noise: a flow without sources or sinks, so it curls.
+			const cx = ( n( p.x, p.y + e ) - n( p.x, p.y - e ) ) / ( 2 * e );
+			const cy = -( n( p.x + e, p.y ) - n( p.x - e, p.y ) ) / ( 2 * e );
+			const k = 0.5 * ( 0.3 + sw.energy );
+			// ...and the stir: round the jar, and round the brush while it swishes.
+			let vx = cx * k - p.y * 0.5 * sw.energy;
+			let vy = cy * k + p.x * 0.5 * sw.energy;
+			if ( sw.at ) {
+				const dx = p.x - sw.at.x;
+				const dy = p.y - sw.at.y;
+				const d2 = dx * dx + dy * dy + 0.02;
+				vx += ( -dy / d2 ) * 0.04 * sw.energy;
+				vy += ( dx / d2 ) * 0.04 * sw.energy;
+			}
+			p.x += vx * dt;
+			p.y += vy * dt;
+			const r = Math.hypot( p.x, p.y );
+			if ( r > 0.84 ) {
+				p.x *= 0.84 / r;
+				p.y *= 0.84 / r;
+			}
+			p.age += dt;
+			// A long trail (about two thirds of a second), kept every other frame.
+			p.tick = ( p.tick || 0 ) + dt;
+			if ( p.tick >= 1 / 30 || ! p.trail.length ) {
+				p.tick = 0;
+				p.trail.push( p.x, p.y );
+				if ( p.trail.length > 40 ) {
+					p.trail.splice( 0, 2 );
+				}
+			} else {
+				p.trail[ p.trail.length - 2 ] = p.x;
+				p.trail[ p.trail.length - 1 ] = p.y;
+			}
+		}
+		sw.parts = sw.parts.filter( ( p ) => p.age < p.life );
+		if ( sw.energy < 0.02 && ! sw.parts.length ) {
+			sw.at = null;
+		}
 	}
 
 	_dipId( t ) {
@@ -762,7 +849,7 @@ export class Director {
 		ctx.restore();
 	}
 
-	/** The water in the jar, clouded by rinsing, its ripples and the glass rim. */
+	/** The water in the jar, clouded by rinsing, its curls and the glass rim. */
 	_drawJarWater( ctx ) {
 		const s = this.scss;
 		const J = this.layout.jar;
@@ -780,14 +867,40 @@ export class Director {
 		ctx.beginPath();
 		ctx.arc( jx, jy, jr * 0.88, 0, Math.PI * 2 );
 		ctx.clip();
-		const pc = this.pc;
-		for ( const rp of this.ripples ) {
-			const age = ( this.time - rp.t ) / 1.2;
-			ctx.strokeStyle = `rgba(255,255,255,${ 0.5 * ( 1 - age ) })`;
-			ctx.lineWidth = Math.max( 0.5, jr * 0.02 );
-			ctx.beginPath();
-			ctx.arc( rp.x * pc, rp.y * pc, jr * ( 0.05 + 0.55 * age ), 0, Math.PI * 2 );
-			ctx.stroke();
+		// The stirred water: each curl a trail, fading and thinning toward its
+		// tail; the colour spreads (wider, fainter) as it ages.
+		ctx.lineCap = 'round';
+		ctx.lineJoin = 'round';
+		const CHUNKS = 4;
+		for ( const p of this.swirl.parts ) {
+			const tr = p.trail;
+			const m = tr.length / 2;
+			if ( m < 3 ) {
+				continue;
+			}
+			const fade = smooth( 0, 0.3, p.age ) * ( 1 - smooth( p.life * 0.5, p.life, p.age ) );
+			const spread = p.rgb ? 1 + p.age * 1.5 : 0.7;
+			for ( let c = 0; c < CHUNKS; c++ ) {
+				// Chunk c of the trail, from the tail (0) to the head.
+				const j0 = Math.floor( ( c * ( m - 1 ) ) / CHUNKS );
+				const j1 = Math.floor( ( ( c + 1 ) * ( m - 1 ) ) / CHUNKS );
+				if ( j1 <= j0 ) {
+					continue;
+				}
+				const u = ( c + 1 ) / CHUNKS;
+				const alpha = ( p.a * fade * u ) / Math.sqrt( spread );
+				ctx.strokeStyle = p.rgb ? rgba( p.rgb, alpha ) : `rgba(255,255,255,${ alpha })`;
+				ctx.lineWidth = jr * p.w * spread * ( 0.4 + 0.6 * u );
+				ctx.beginPath();
+				ctx.moveTo( jx + tr[ j0 * 2 ] * jr, jy + tr[ j0 * 2 + 1 ] * jr );
+				for ( let i = j0 + 1; i < j1; i++ ) {
+					const x = jx + tr[ i * 2 ] * jr;
+					const y = jy + tr[ i * 2 + 1 ] * jr;
+					ctx.quadraticCurveTo( x, y, ( x + jx + tr[ i * 2 + 2 ] * jr ) / 2, ( y + jy + tr[ i * 2 + 3 ] * jr ) / 2 );
+				}
+				ctx.lineTo( jx + tr[ j1 * 2 ] * jr, jy + tr[ j1 * 2 + 1 ] * jr );
+				ctx.stroke();
+			}
 		}
 		ctx.restore();
 		ctx.strokeStyle = 'rgba(255,255,255,0.85)';
@@ -816,7 +929,13 @@ export class Director {
 		const { hairL, ferW, ferL, handleL, ink } = this.brushDims();
 		const pc = this.pc;
 		const lift = Math.max( 0, h.lift );
-		const touching = 1 - smooth( 0, 0.3, lift );
+		const touching = 1 - smooth( 0, 0.45, lift );
+		// How hard the hand bears down follows the contact gently: lifting off,
+		// the pressure eases away over a third of a second (the splayed hairs
+		// close up as the brush rises, not all at once); landing, it builds up
+		// a little quicker.
+		const bear = 1 - Math.exp( -dt / ( touching < ( this.bear ?? 0 ) ? RELEASE_EASE : PRESS_EASE ) );
+		this.bear = undefined === this.bear ? touching : this.bear + ( touching - this.bear ) * bear;
 		// The handle leans up and to the right, pulled along the motion; a
 		// living hand is never quite still.
 		const tremor = Math.sin( this.time * 3.1 ) * 0.004 + Math.sin( this.time * 1.7 + 1 ) * 0.006;
@@ -853,11 +972,13 @@ export class Director {
 			this.corr.x *= melt;
 			this.corr.y *= melt;
 		}
-		const height = Math.min( 2, lift ) * hairL * 0.9;
+		// The brush rises slowly at first (the hairs still drag on the paper
+		// while the pressure goes), then clears it.
+		const height = Math.min( 2, lift ) * smooth( 0, 0.6, lift ) * hairL * 0.9;
 		const F = {
 			x: P.x - down.x * hairL + this.corr.x,
 			y: P.y - down.y * hairL + this.corr.y,
-			z: -down.z * hairL - this.depth * touching + height,
+			z: -down.z * hairL - this.depth * this.bear + height,
 		};
 		br.step( dt, { F, down, hairL, fw: ferW * 0.47, belly: ferW * 0.5 * ( 0.5 + 0.35 * this.load ), wet: 0.25 + 0.75 * this.load, dry: 1 - this.load, dirX: h.dirX || 0, dirY: h.dirY || 0, air: smooth( 0.05, 0.4, lift ) } );
 
@@ -994,62 +1115,23 @@ export class Director {
 		const K = 20000;
 		const br = this.br;
 		const S = br.segs;
-		// All parts go into one layer as solid shapes, then that layer is laid
-		// down once: where parts overlap the shadow is no darker. The layer
-		// only covers the brush's shadow, not the whole screen.
-		const pts = [ F, E3, { x: lerp( E3.x, End3.x, 0.3 ), y: lerp( E3.y, End3.y, 0.3 ), z: lerp( E3.z, End3.z, 0.3 ) }, End3 ].map( ( p ) => fall( p.x, p.y, p.z ) );
-		const m = ctx.getTransform();
-		const blurHandle = ( 6 + hairL * 0.15 ) * scale;
-		let bx0 = Infinity;
-		let by0 = Infinity;
-		let bx1 = -Infinity;
-		let by1 = -Infinity;
-		const grow = ( x, y ) => {
-			bx0 = Math.min( bx0, x );
-			by0 = Math.min( by0, y );
-			bx1 = Math.max( bx1, x );
-			by1 = Math.max( by1, y );
-		};
-		for ( const p of pts ) {
-			grow( p[ 0 ], p[ 1 ] );
-		}
-		for ( let i = 0; i < br.hairs.length; i += 2 ) {
-			for ( let j = 0; j <= S; j += S ) {
-				const [ x, y, z ] = br.at( i, j );
-				const [ sx, sy ] = fall( x, y, z );
-				grow( sx, sy );
-			}
-		}
-		// To device px, with room for the blur and the widths.
-		const pad = 2.5 * blurHandle + ferW * m.a;
-		const dx0 = Math.floor( Math.max( 0, bx0 * m.a + m.e - pad ) );
-		const dy0 = Math.floor( Math.max( 0, by0 * m.d + m.f - pad ) );
-		const dx1 = Math.ceil( Math.min( ctx.canvas.width, bx1 * m.a + m.e + pad ) );
-		const dy1 = Math.ceil( Math.min( ctx.canvas.height, by1 * m.d + m.f + pad ) );
-		if ( dx1 <= dx0 || dy1 <= dy0 ) {
-			return;
-		}
-		const lw = dx1 - dx0;
-		const lh = dy1 - dy0;
-		if ( ! this.shade || this.shade.width < lw || this.shade.height < lh ) {
-			this.shade = document.createElement( 'canvas' );
-			this.shade.width = Math.max( lw, this.shade?.width || 0 );
-			this.shade.height = Math.max( lh, this.shade?.height || 0 );
-		}
-		const g = this.shade.getContext( '2d' );
-		g.setTransform( 1, 0, 0, 1, 0, 0 );
-		g.clearRect( 0, 0, lw, lh );
-		g.setTransform( m.a, m.b, m.c, m.d, m.e - dx0, m.f - dy0 );
-		g.shadowOffsetX = K * scale;
-		g.lineCap = 'round';
-		g.lineJoin = 'round';
-		g.strokeStyle = '#000';
-		g.fillStyle = '#000';
+		// Drawn straight onto the frame, in two strokes of the pen: the handle
+		// as one filled shape and all the hairs as one stroke. Within one
+		// stroke nothing is painted twice, so overlapping parts never darken;
+		// the handle's shadow starts a little up the ferrule, clear of the
+		// hairs'. (No separate layer to clear and lay down every frame.)
+		const pts = [ { x: lerp( F.x, E3.x, 0.35 ), y: lerp( F.y, E3.y, 0.35 ), z: lerp( F.z, E3.z, 0.35 ) }, E3, { x: lerp( E3.x, End3.x, 0.3 ), y: lerp( E3.y, End3.y, 0.3 ), z: lerp( E3.z, End3.z, 0.3 ) }, End3 ].map( ( p ) => fall( p.x, p.y, p.z ) );
+		ctx.save();
+		ctx.shadowOffsetX = K * scale;
+		ctx.lineCap = 'round';
+		ctx.lineJoin = 'round';
+		ctx.strokeStyle = '#000';
+		ctx.fillStyle = '#000';
 		// Ferrule and handle: higher, so softer and fainter, tapering away.
 		const widths = [ ferW * 0.45, ferW * 0.45, ferW * 0.55, ferW * 0.25 ];
-		g.shadowColor = 'rgba(40,28,16,0.5)';
-		g.shadowBlur = blurHandle;
-		g.beginPath();
+		ctx.shadowColor = 'rgba(40,28,16,0.14)';
+		ctx.shadowBlur = ( 6 + hairL * 0.15 ) * scale;
+		ctx.beginPath();
 		const side = ( k, sgn ) => {
 			const a0 = pts[ Math.max( 0, k - 1 ) ];
 			const a1 = pts[ Math.min( pts.length - 1, k + 1 ) ];
@@ -1059,30 +1141,26 @@ export class Director {
 			return [ pts[ k ][ 0 ] - K + ( sgn * nx * widths[ k ] ) / n, pts[ k ][ 1 ] + ( sgn * ny * widths[ k ] ) / n ];
 		};
 		for ( let k = 0; k < pts.length; k++ ) {
-			g[ k ? 'lineTo' : 'moveTo' ]( ...side( k, 1 ) );
+			ctx[ k ? 'lineTo' : 'moveTo' ]( ...side( k, 1 ) );
 		}
 		for ( let k = pts.length - 1; k >= 0; k-- ) {
-			g.lineTo( ...side( k, -1 ) );
+			ctx.lineTo( ...side( k, -1 ) );
 		}
-		g.closePath();
-		g.fill();
+		ctx.closePath();
+		ctx.fill();
 		// Hairs: near the paper, sharp and dark.
-		g.shadowColor = 'rgba(40,28,16,1)';
-		g.shadowBlur = ( 1.5 + F.z * 0.04 ) * scale;
-		g.lineWidth = ferW * 0.35;
-		g.beginPath();
+		ctx.shadowColor = 'rgba(40,28,16,0.28)';
+		ctx.shadowBlur = ( 1.5 + F.z * 0.04 ) * scale;
+		ctx.lineWidth = ferW * 0.35;
+		ctx.beginPath();
 		for ( let i = 0; i < br.hairs.length; i += 2 ) {
 			for ( let j = 0; j <= S; j++ ) {
 				const [ x, y, z ] = br.at( i, j );
 				const [ sx, sy ] = fall( x, y, z );
-				g[ j ? 'lineTo' : 'moveTo' ]( sx - K, sy );
+				ctx[ j ? 'lineTo' : 'moveTo' ]( sx - K, sy );
 			}
 		}
-		g.stroke();
-		ctx.save();
-		ctx.setTransform( 1, 0, 0, 1, 0, 0 );
-		ctx.globalAlpha = 0.28;
-		ctx.drawImage( this.shade, 0, 0, lw, lh, dx0, dy0, lw, lh );
+		ctx.stroke();
 		ctx.restore();
 		// Where the hairs press on the wet paper it darkens a little.
 		const c = br.contact;

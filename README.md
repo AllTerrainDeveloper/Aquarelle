@@ -33,14 +33,17 @@ tabs, then press **Paint** (it also pauses and resumes):
   jar and a palette with a well per colour. The camera follows the brush,
   moving in close for fine marks and pulling back for washes and while paint
   dries. Between colours, and whenever it runs dry, the brush goes to the
-  jar to rinse (the water clouds with what is rinsed) and loads up in the
+  jar to rinse (the colour comes off in curls carried by a curl-noise flow,
+  and the water clouds with what is rinsed) and loads up in the
   next well. The brush's hairs are simulated (js/bristles.js): each is a short
   chain that springs back to a round brush's shape, clings to the others
   while wet, cannot pass through the paper, is held back by friction where
   it touches and fans out when pressed; in the air the bundle travels with
   its ferrule, so it does not swing about. The hand only places and tilts
   the ferrule, pressing harder until the touching hairs are as wide as the
-  paint (a broad wash takes a bigger brush), and steering them onto it. Wet washes catch the light. *Record
+  paint (a broad wash takes a bigger brush), and steering them onto it.
+  Lifting off, the pressure eases away while the hairs still drag on the
+  paper, so the splayed bundle closes up gradually before the brush rises. Wet washes catch the light. *Record
   video* records what the camera sees. Everything moves on springs or eased
   paths (the brush is carried through the air between all marks and comes
   down onto the paper), the brush's tip sits on the paint as it is laid, the brush grows slowly for broad washes (capped on screen), it lifts clear off the sheet and over gaps, the camera frames each flight with its destination, and
@@ -180,8 +183,10 @@ granulation and backruns all emerge from it.
   (plus a one-tile ring) are simulated. Dry tiles are a stable layer and
   are never recomputed. Changed tiles are folded into one RGBA32F field
   `(ΣA_k(d_k+g_k), water)`.
-- **GPU (WebGL2):** only the dirty rows of that field are uploaded each
-  frame. A single fragment shader upsamples it and composes the look:
+- **GPU (WebGL2):** only the changed tiles of that field are uploaded each
+  frame (one rectangle per row of tiles), as full floats into a staging
+  texture that the GPU copies into the half-float texture the shader
+  reads (the browser would otherwise convert every value). A single fragment shader upsamples it and composes the look:
   Beer–Lambert glazing over a cold-press sheet (tooth lit from the upper
   left, fibres, uneven sizing; subtractive mixing: yellow over blue reads
   green), domain-warped edges (crisp, organic borders far
@@ -207,7 +212,8 @@ Modules: `ImageAnalyzer`, `CompositionPlanner`, `SplashGenerator`,
 | Risk | Mitigation |
 |---|---|
 | Full-grid simulation every step | Tile activity: only wet tiles and their ring are simulated; per-tile pigment bitmasks skip absent pigments |
-| Large texture uploads | Row-range `texSubImage2D` of dirty rows only |
+| Large texture uploads | Changed tiles only, as rectangles (`UNPACK_ROW_LENGTH`); full floats staged and converted to half floats on the GPU |
+| Overlay drawing in Cinematic | The still desk is painted once and reused; the brush's shadow is drawn straight onto the frame in two blurred strokes (no extra layer) |
 | Perceptual metrics in the render loop | Worker-side evaluation every 3–9 s; the main thread only copies a density snapshot (~0.01 ms/frame amortised) |
 | Big stamps / many gestures in one frame | Ops per frame, sim time per frame and gesture-deposit time per frame are capped by the adaptive level; blooming drops only scan the radius reached so far |
 | Gesture pile-up at high speed | Backpressure: above a cap on gestures in flight, new ops wait (the timeline slows, frames don't) |
