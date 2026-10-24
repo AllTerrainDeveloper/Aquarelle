@@ -45,6 +45,10 @@ tabs, then press **Paint** (it also pauses and resumes):
   down onto the paper), the brush's tip sits on the paint as it is laid, the brush grows slowly for broad washes (capped on screen), it lifts clear off the sheet and over gaps, the camera frames each flight with its destination, and
   the sheet is rendered for the camera's view at screen resolution, so it
   stays sharp up close.
+  *Keep painting until similarity reaches* (85% by default): after the
+  painting, Cinematic keeps refining the weakest areas, as Endless does,
+  until the similarity score reaches the target; it also stops if nothing
+  is left to improve, and says whether the target was reached.
 
 In the open-ended modes (Quick, Endless, Real time, Cinematic) marks that
 are due wait in a small pool, and the painter takes the next one as the hand

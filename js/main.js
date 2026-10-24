@@ -523,6 +523,7 @@ function selectTab( name, focus ) {
 	$( 'modeHint' ).textContent = MODE_HINTS[ name ];
 	$( 'endlessOpts' ).hidden = 'endless' !== name;
 	$( 'customOpts' ).hidden = 'custom' !== name;
+	$( 'cinematicOpts' ).hidden = 'cinematic' !== name;
 	try {
 		localStorage.setItem( 'aquarelle-tab', name );
 	} catch ( err ) {}
@@ -555,11 +556,37 @@ for ( const b of tabButtons ) {
 }
 selectTab( tab );
 
-/** The selected tab as a controller mode and the Endless flag. */
+/** Cinematic's target similarity (%), kept between 50 and 99. */
+function simTarget() {
+	const v = Math.round( Number( $( 'simTarget' ).value ) || 85 );
+	return Math.min( 99, Math.max( 50, v ) );
+}
+// Remember the option and its target between visits.
+try {
+	$( 'untilSim' ).checked = '1' === localStorage.getItem( 'aquarelle-until-sim' );
+	$( 'simTarget' ).value = localStorage.getItem( 'aquarelle-sim-target' ) || 85;
+} catch ( err ) {}
+$( 'untilSim' ).addEventListener( 'change', ( e ) => {
+	try {
+		localStorage.setItem( 'aquarelle-until-sim', e.target.checked ? '1' : '' );
+	} catch ( err ) {}
+} );
+$( 'simTarget' ).addEventListener( 'change', ( e ) => {
+	e.target.value = simTarget();
+	try {
+		localStorage.setItem( 'aquarelle-sim-target', e.target.value );
+	} catch ( err ) {}
+} );
+
+/** The selected tab as a controller mode, the Endless flag and any target similarity. */
 function tabMode() {
 	if ( 'endless' === tab ) {
 		const pace = document.querySelector( 'input[name="pace"]:checked' );
 		return { mode: pace ? pace.value : 'quick', endless: true };
+	}
+	if ( 'cinematic' === tab && $( 'untilSim' ).checked ) {
+		// Paints, then refines (as Endless does) until the target similarity.
+		return { mode: 'cinematic', endless: true, target: simTarget() };
 	}
 	return { mode: 'custom' === tab ? 'paint' : tab, endless: false };
 }
@@ -573,8 +600,8 @@ function play() {
 		return;
 	}
 	const st = animation.state;
-	const { mode, endless } = tabMode();
-	const same = mode === animation.mode && endless === animation.endless;
+	const { mode, endless, target = 0 } = tabMode();
+	const same = mode === animation.mode && endless === animation.endless && target === animation.targetSim;
 	if ( 'painting' === st ) {
 		animation.pause();
 	} else if ( 'paused' === st && same ) {
@@ -583,7 +610,7 @@ function play() {
 		if ( 'ready' !== st || ! same ) {
 			restart();
 		}
-		animation.setMode( mode, QUICK_SECONDS, endless );
+		animation.setMode( mode, QUICK_SECONDS, endless, target );
 		syncCinematic();
 		director.reset();
 		animation.start();
@@ -692,7 +719,7 @@ function updateHud( s ) {
 	// Endless is about the likeness improving: its score is always shown.
 	const sc = finalScores || s.scores;
 	$( 'sim' ).hidden = ! DEV && ! s.endless;
-	$( 'sim' ).textContent = sc ? `similarity ${ sc.similarity.toFixed( 1 ) }` : 'similarity —';
+	$( 'sim' ).textContent = ( sc ? `similarity ${ sc.similarity.toFixed( 1 ) }` : 'similarity —' ) + ( s.target ? ` / ${ s.target }` : '' );
 	if ( ! DEV ) {
 		return;
 	}

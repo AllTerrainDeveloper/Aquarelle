@@ -78,6 +78,7 @@ export class AnimationController {
 		this.dryingWait = false;
 		this.round = 0;
 		this.converged = false;
+		this.reachedTarget = false;
 		this.areas = null;
 		this.lastArea = null;
 		this.waitEval = null;
@@ -132,9 +133,12 @@ export class AnimationController {
 	 * Endless (quick or realtime): after the layers, keep refining in rounds
 	 * against the paper as it is, each stricter than the last, until rounds
 	 * find nothing left to improve.
+	 * `target` (similarity, %): with endless, stop as soon as the painting
+	 * scores that much (Cinematic's "until similarity" option).
 	 */
-	setMode( mode, quickSeconds = 20, endless = false ) {
+	setMode( mode, quickSeconds = 20, endless = false, target = 0 ) {
 		this.mode = mode;
+		this.targetSim = endless ? target : 0;
 		this.timelapse = 'quick' === mode ? quickSeconds : 0;
 		// Open-ended: no time budget and no schedule, only the work.
 		this.openEnded = 'paint' !== mode;
@@ -236,6 +240,18 @@ export class AnimationController {
 			this.lastArea = best;
 		}
 		return best;
+	}
+
+	/** What the header says when a layered painting is done. */
+	_doneLabel() {
+		const sim = this.lastScores ? this.lastScores.similarity.toFixed( 1 ) : '—';
+		if ( this.reachedTarget ) {
+			return `Finished: ${ sim }% similar, target ${ this.targetSim }% reached`;
+		}
+		if ( this.targetSim && this.converged ) {
+			return `Finished at ${ sim }%: nothing left to improve, target ${ this.targetSim }% not reached`;
+		}
+		return this.converged ? `Finished: nothing left to improve after ${ this.round } rounds` : 'Finished';
 	}
 
 	/** Feed a new error map from the evaluator. */
@@ -530,6 +546,12 @@ export class AnimationController {
 				return;
 			}
 			this.waitEval = null;
+			// With a target, a fresh score that reaches it ends the painting.
+			if ( this.targetSim && this.lastScores && this.lastScores.similarity >= this.targetSim ) {
+				this.reachedTarget = true;
+				this.converged = true;
+				return;
+			}
 			area = this._worstArea();
 			if ( ! area ) {
 				this.converged = true;
@@ -580,6 +602,9 @@ export class AnimationController {
 				this.round++;
 				area.visits++;
 				this.layerName = `Refining the weakest area (${ area.col + 1 }, ${ area.row + 1 }), round ${ this.round }`;
+				if ( this.targetSim && this.lastScores ) {
+					this.layerName += ` · ${ this.lastScores.similarity.toFixed( 1 ) }% of ${ this.targetSim }%`;
+				}
 				// An area visited enough whose last two visits found nothing to
 				// do is finished; when all are, the painting has converged.
 				area.empty = res.ops.length ? 0 : area.empty + 1;
@@ -760,7 +785,8 @@ export class AnimationController {
 			// Open-ended modes have no set duration.
 			duration: this.openEnded ? 0 : this.duration,
 			progress: 'done' === this.state ? 1 : u * 0.995,
-			stage: layered ? ( 'done' === this.state ? ( this.converged ? `Finished: nothing left to improve after ${ this.round } rounds` : 'Finished' ) : this.finishing ? 'Drying' : this.layerName ) : STAGES[ stage ].name,
+			stage: layered ? ( 'done' === this.state ? this._doneLabel() : this.finishing ? 'Drying' : this.layerName ) : STAGES[ stage ].name,
+			target: this.targetSim,
 			endless: !! this.endless,
 			fps: this.adaptive.fps,
 			level: this.adaptive.level,

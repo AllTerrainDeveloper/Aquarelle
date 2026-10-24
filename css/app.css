@@ -583,3 +583,25 @@ button.attention {
 .canvases.cinematic canvas#paint {
 	box-shadow: none;
 }
+
+/* Cinematic: keep painting until a target similarity */
+#cinematicOpts {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 6px 8px;
+}
+
+#cinematicOpts[hidden] {
+	display: none;
+}
+
+#cinematicOpts .inline {
+	display: inline-flex;
+	align-items: center;
+	gap: 4px;
+}
+
+#cinematicOpts input[type="number"] {
+	width: 4.5em;
+}

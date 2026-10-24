@@ -61,6 +61,10 @@
 						<label><input type="radio" name="pace" value="realtime"> Real time</label>
 					</div>
 				</div>
+				<div class="field" id="cinematicOpts" hidden>
+					<label class="check"><input type="checkbox" id="untilSim"> Keep painting until similarity reaches</label>
+					<label class="inline" for="simTarget"><input type="number" id="simTarget" min="50" max="99" step="1" value="85"> %</label>
+				</div>
 				<div id="customOpts" hidden>
 					<div class="field">
 						<label for="duration">Time to spend <output id="durOut">10 min</output></label>
