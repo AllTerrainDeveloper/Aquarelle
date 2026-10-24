@@ -83,7 +83,8 @@ export class Bristles {
 
 	/**
 	 * Advance the hairs by dt seconds with the ferrule placed by `f`:
-	 * { F, down, hairL, fw, belly, wet (0–1), dry (0–1) }.
+	 * { F, down, hairL, fw, belly, wet (0–1), dry (0–1), air (0–1: off the
+	 * paper) }.
 	 */
 	step( dt, f ) {
 		this._restShape( f );
@@ -97,14 +98,35 @@ export class Bristles {
 			p.set( R );
 			q.set( R );
 			this.ready = true;
+			this.lastF = { ...f.F };
+		}
+		// In the air a wet bundle travels with its ferrule, barely swinging: the
+		// ferrule's move is carried over to every hair (and its momentum), so
+		// only a little of it is left for the hairs to lag behind. On the paper
+		// none is carried, and friction makes the hairs trail.
+		const air = Math.min( 1, Math.max( 0, f.air || 0 ) );
+		const carry = 0.9 * air;
+		if ( carry > 0 ) {
+			const mx = ( f.F.x - this.lastF.x ) * carry;
+			const my = ( f.F.y - this.lastF.y ) * carry;
+			const mz = ( f.F.z - this.lastF.z ) * carry;
+			for ( let o = 0; o < p.length; o += 3 ) {
+				p[ o ] += mx;
+				p[ o + 1 ] += my;
+				p[ o + 2 ] += mz;
+				q[ o ] += mx;
+				q[ o + 1 ] += my;
+				q[ o + 2 ] += mz;
+			}
 		}
 		this.lastF = { ...f.F };
 		const segL = f.hairL / S;
 		const steps = Math.max( 1, Math.min( 24, Math.ceil( dt * 240 ) ) );
 		const h = dt / steps;
 		const rate = h * 120;
-		// Momentum kept per step: the same damping whatever the frame rate.
-		const keep = Math.exp( -h * 9 );
+		// Momentum kept per step: the same damping whatever the frame rate;
+		// water and air damp a swinging bundle quickly.
+		const keep = Math.exp( -h * ( 9 + 14 * air ) );
 		const mean = new Float32Array( ( S + 1 ) * 3 );
 		for ( let it = 0; it < steps; it++ ) {
 			// Roots go with the ferrule; the rest move on and spring back.

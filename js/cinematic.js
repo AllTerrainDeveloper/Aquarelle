@@ -52,8 +52,12 @@ const MAX_HAIR_PX = 54;
 const MAX_ZOOM = 2.4;
 const LOOKAHEAD = 2.5;
 // Broad washes take a bigger brush: up to this much bigger, and this long on screen.
-const MAX_GROW = 1.8;
-const MAX_BIG_HAIR_PX = 80;
+const MAX_GROW = 2.4;
+const MAX_BIG_HAIR_PX = 120;
+// Pressed right down, a round brush spreads to about this many hair lengths
+// either side; and the deepest it is pressed (in hair lengths).
+const SPREAD = 0.42;
+const MAX_PRESS = 0.85;
 
 /** Half-width of the paint a brush blob lays at progress p (path: x, y, s, r). */
 function inkAt( path, p ) {
@@ -179,6 +183,7 @@ export class Director {
 		this.H = session.H;
 		this.colors = session.an.pigments.map( ( p ) => hexRgb( p.hex ) );
 		this.layout = deskLayout( session.W / session.H, session.an.pigments );
+		this.deskCache = null;
 		this.animator.desk = this._deskInCells();
 		this.reset();
 	}
@@ -211,8 +216,20 @@ export class Director {
 
 	/** Called by the page layout with the sheet's size on screen (CSS px per desk unit). */
 	setScale( scss ) {
+		// The camera is kept (only rescaled): a relayout, say when the quality
+		// level changes during a slow frame, must never cut back to the wide shot.
+		const r = scss / this.scss;
+		if ( this.cam && r !== 1 && isFinite( r ) ) {
+			const c = this.cam;
+			c.x *= r;
+			c.y *= r;
+			c.vx *= r;
+			c.vy *= r;
+		}
+		if ( this.framing && r !== 1 && isFinite( r ) ) {
+			this.framing.focus = { x: this.framing.focus.x * r, y: this.framing.focus.y * r };
+		}
 		this.scss = scss;
-		this.cam = null;
 	}
 
 	/** Cells to sheet CSS px. */
@@ -385,7 +402,8 @@ export class Director {
 		h.tip = h.ink || 2;
 		// A wide ribbon of paint calls for a bigger brush: it grows (and
 		// shrinks back) slowly, never in a jump.
-		const base = Math.min( 0.05 * this.scss, MAX_HAIR_PX / ( this.cam ? this.cam.z : 1 ) ) * 0.26 * 0.9;
+		// Grown so that, pressed right down, its hairs can spread as wide as the paint.
+		const base = Math.min( 0.05 * this.scss, MAX_HAIR_PX / ( this.cam ? this.cam.z : 1 ) ) * SPREAD;
 		const want = h.ink ? Math.min( MAX_GROW, Math.max( 1, ( h.ink * this.pc ) / base ) ) : 1;
 		h.grow = ( h.grow || 1 ) + ( want - ( h.grow || 1 ) ) * ( 1 - Math.exp( -dt / 0.8 ) );
 		h.dip = !! T.dip;
@@ -440,7 +458,8 @@ export class Director {
 		const grow = ( this.hand && this.hand.grow ) || 1;
 		const k = Math.min( 0.05 * this.scss * grow, ( MAX_HAIR_PX * grow ) / z, MAX_BIG_HAIR_PX / z );
 		const ink = ( ( this.hand && this.hand.ink ) || 0 ) * this.pc;
-		return { hairL: k, ferW: k * 0.26, ferL: k * 0.62, handleL: k * 4.6, ink };
+		// A bigger brush has a longer handle, but not in proportion.
+		return { hairL: k, ferW: k * 0.26, ferL: k * 0.62, handleL: ( k * 4.6 ) / Math.sqrt( grow ), ink };
 	}
 
 	/* The camera ----------------------------------------------------------------- */
@@ -597,24 +616,87 @@ export class Director {
 		this.recorder?.frame();
 	}
 
+	/**
+	 * The desk, the sheet's shadow, the palette and the jar's glass hardly
+	 * change, so they are painted once into a picture (at the resolution the
+	 * closest shot needs, within limits) and that is laid down each frame.
+	 * Only the water in the jar is drawn live.
+	 */
 	_drawDesk( ctx, z ) {
+		const s = this.scss;
+		const L = this.layout;
+		const dpr = this.overlay.width / ( this.overlay.clientWidth || this.overlay.width );
+		const vw = this.stage.clientWidth;
+		const vh = this.stage.clientHeight;
+		// The view in sheet px.
+		const x0 = -( this.ox + this.tx ) / z;
+		const y0 = -( this.oy + this.ty ) / z;
+		const x1 = x0 + vw / z;
+		const y1 = y0 + vh / z;
+		const key = [ s, vw, vh, dpr, this.colors.join() ].join( '|' );
+		if ( ! this.deskCache || this.deskCache.key !== key ) {
+			// Everything the camera can show: the desk's bounds and the wide shot.
+			const b = L.bounds;
+			const cx = ( ( b.x0 + b.x1 ) / 2 ) * s;
+			const cy = ( ( b.y0 + b.y1 ) / 2 ) * s;
+			const m = 0.15 * Math.max( vw, vh );
+			const R = {
+				x0: Math.min( b.x0 * s, cx - vw / 2 ) - m,
+				y0: Math.min( b.y0 * s, cy - vh / 2 ) - m,
+				x1: Math.max( b.x1 * s, cx + vw / 2 ) + m,
+				y1: Math.max( b.y1 * s, cy + vh / 2 ) + m,
+			};
+			const rw = R.x1 - R.x0;
+			const rh = R.y1 - R.y0;
+			const cs = Math.min( dpr * MAX_ZOOM, 4096 / Math.max( rw, rh ) );
+			const c = this.deskCache?.canvas || document.createElement( 'canvas' );
+			c.width = Math.ceil( rw * cs );
+			c.height = Math.ceil( rh * cs );
+			const g = c.getContext( '2d' );
+			g.setTransform( cs, 0, 0, cs, -R.x0 * cs, -R.y0 * cs );
+			// Shadows as soft as they always looked on a sharp (2×) screen.
+			this._paintDesk( g, R, cs / 2 );
+			this.deskCache = { key, canvas: c, R };
+		}
+		const { canvas, R } = this.deskCache;
+		if ( x0 < R.x0 || y0 < R.y0 || x1 > R.x1 || y1 > R.y1 ) {
+			// Past the picture's edge (it should not happen): plain desk.
+			this.pattern = this.pattern || deskPattern( ctx );
+			ctx.save();
+			ctx.beginPath();
+			ctx.rect( x0 - 2, y0 - 2, x1 - x0 + 4, y1 - y0 + 4 );
+			ctx.rect( R.x0, R.y0, R.x1 - R.x0, R.y1 - R.y0 );
+			ctx.clip( 'evenodd' );
+			ctx.fillStyle = this.pattern;
+			ctx.fillRect( x0 - 2, y0 - 2, x1 - x0 + 4, y1 - y0 + 4 );
+			ctx.restore();
+		}
+		// Only the part in view, from the picture.
+		const cs = canvas.width / ( R.x1 - R.x0 );
+		const vx0 = Math.max( R.x0, x0 - 2 );
+		const vy0 = Math.max( R.y0, y0 - 2 );
+		const vx1 = Math.min( R.x1, x1 + 2 );
+		const vy1 = Math.min( R.y1, y1 + 2 );
+		if ( vx1 > vx0 && vy1 > vy0 ) {
+			ctx.drawImage( canvas, ( vx0 - R.x0 ) * cs, ( vy0 - R.y0 ) * cs, ( vx1 - vx0 ) * cs, ( vy1 - vy0 ) * cs, vx0, vy0, vx1 - vx0, vy1 - vy0 );
+		}
+		this._drawJarWater( ctx );
+	}
+
+	/** The still parts of the desk, into its picture (`z`: the shadows' scale). */
+	_paintDesk( ctx, R, z ) {
 		const s = this.scss;
 		const L = this.layout;
 		const pw = L.Wn * s;
 		const ph = L.Hn * s;
-		// The view in sheet px.
-		const x0 = -( this.ox + this.tx ) / z;
-		const y0 = -( this.oy + this.ty ) / z;
-		const x1 = x0 + this.stage.clientWidth / z;
-		const y1 = y0 + this.stage.clientHeight / z;
-		this.pattern = this.pattern || deskPattern( ctx );
+		const pattern = deskPattern( ctx );
 		ctx.save();
 		ctx.beginPath();
-		ctx.rect( x0 - 2, y0 - 2, x1 - x0 + 4, y1 - y0 + 4 );
+		ctx.rect( R.x0, R.y0, R.x1 - R.x0, R.y1 - R.y0 );
 		ctx.rect( 0.3, 0.3, pw - 0.6, ph - 0.6 );
 		ctx.clip( 'evenodd' );
-		ctx.fillStyle = this.pattern;
-		ctx.fillRect( x0 - 2, y0 - 2, x1 - x0 + 4, y1 - y0 + 4 );
+		ctx.fillStyle = pattern;
+		ctx.fillRect( R.x0, R.y0, R.x1 - R.x0, R.y1 - R.y0 );
 		// The sheet's shadow on the desk.
 		ctx.shadowColor = 'rgba(40,28,15,0.28)';
 		ctx.shadowBlur = 14 * z;
@@ -663,7 +745,7 @@ export class Director {
 			ctx.fill();
 		}
 
-		// Water jar, seen from above: glass rim, the water clouded by rinsing.
+		// Water jar, seen from above: its glass (the water is drawn live).
 		const J = L.jar;
 		const jx = J.x * s;
 		const jy = J.y * s;
@@ -678,6 +760,15 @@ export class Director {
 		ctx.arc( jx, jy, jr, 0, Math.PI * 2 );
 		ctx.fill();
 		ctx.restore();
+	}
+
+	/** The water in the jar, clouded by rinsing, its ripples and the glass rim. */
+	_drawJarWater( ctx ) {
+		const s = this.scss;
+		const J = this.layout.jar;
+		const jx = J.x * s;
+		const jy = J.y * s;
+		const jr = J.r * s;
 		const wg = ctx.createRadialGradient( jx - jr * 0.25, jy - jr * 0.3, 0, jx, jy, jr * 0.9 );
 		wg.addColorStop( 0, rgba( mixRgb( this.water, [ 255, 255, 255 ], 0.45 ), 0.9 ) );
 		wg.addColorStop( 1, rgba( mixRgb( this.water, [ 60, 70, 80 ], 0.15 ), 0.95 ) );
@@ -743,9 +834,9 @@ export class Director {
 		// the paint (a light touch where there is no paint to match).
 		const want = ink > 0 ? ink : ferW * 0.3;
 		if ( touching > 0.5 && c.n ) {
-			this.depth += Math.max( -ferW, Math.min( ferW, want - c.width ) ) * dt * 5;
+			this.depth += Math.max( -ferW, Math.min( ferW, want - c.width ) ) * dt * 8;
 		}
-		this.depth = Math.min( hairL * 0.55, Math.max( hairL * 0.06, this.depth || hairL * 0.12 ) );
+		this.depth = Math.min( hairL * MAX_PRESS, Math.max( hairL * 0.06, this.depth || hairL * 0.12 ) );
 		// Steering: the touching part of the bundle sits on the paint.
 		const P = { x: h.x * pc, y: h.y * pc };
 		if ( touching > 0.5 && c.n ) {
@@ -768,7 +859,7 @@ export class Director {
 			y: P.y - down.y * hairL + this.corr.y,
 			z: -down.z * hairL - this.depth * touching + height,
 		};
-		br.step( dt, { F, down, hairL, fw: ferW * 0.47, belly: ferW * 0.5 * ( 0.5 + 0.35 * this.load ), wet: 0.25 + 0.75 * this.load, dry: 1 - this.load, dirX: h.dirX || 0, dirY: h.dirY || 0 } );
+		br.step( dt, { F, down, hairL, fw: ferW * 0.47, belly: ferW * 0.5 * ( 0.5 + 0.35 * this.load ), wet: 0.25 + 0.75 * this.load, dry: 1 - this.load, dirX: h.dirX || 0, dirY: h.dirY || 0, air: smooth( 0.05, 0.4, lift ) } );
 
 		// Seen from above and in front: height lifts a point up the screen.
 		const proj = ( x, y, z ) => [ x, y - z ];
@@ -904,27 +995,60 @@ export class Director {
 		const br = this.br;
 		const S = br.segs;
 		// All parts go into one layer as solid shapes, then that layer is laid
-		// down once: where parts overlap the shadow is no darker.
-		const cv = ctx.canvas;
-		if ( ! this.shade || this.shade.width !== cv.width || this.shade.height !== cv.height ) {
+		// down once: where parts overlap the shadow is no darker. The layer
+		// only covers the brush's shadow, not the whole screen.
+		const pts = [ F, E3, { x: lerp( E3.x, End3.x, 0.3 ), y: lerp( E3.y, End3.y, 0.3 ), z: lerp( E3.z, End3.z, 0.3 ) }, End3 ].map( ( p ) => fall( p.x, p.y, p.z ) );
+		const m = ctx.getTransform();
+		const blurHandle = ( 6 + hairL * 0.15 ) * scale;
+		let bx0 = Infinity;
+		let by0 = Infinity;
+		let bx1 = -Infinity;
+		let by1 = -Infinity;
+		const grow = ( x, y ) => {
+			bx0 = Math.min( bx0, x );
+			by0 = Math.min( by0, y );
+			bx1 = Math.max( bx1, x );
+			by1 = Math.max( by1, y );
+		};
+		for ( const p of pts ) {
+			grow( p[ 0 ], p[ 1 ] );
+		}
+		for ( let i = 0; i < br.hairs.length; i += 2 ) {
+			for ( let j = 0; j <= S; j += S ) {
+				const [ x, y, z ] = br.at( i, j );
+				const [ sx, sy ] = fall( x, y, z );
+				grow( sx, sy );
+			}
+		}
+		// To device px, with room for the blur and the widths.
+		const pad = 2.5 * blurHandle + ferW * m.a;
+		const dx0 = Math.floor( Math.max( 0, bx0 * m.a + m.e - pad ) );
+		const dy0 = Math.floor( Math.max( 0, by0 * m.d + m.f - pad ) );
+		const dx1 = Math.ceil( Math.min( ctx.canvas.width, bx1 * m.a + m.e + pad ) );
+		const dy1 = Math.ceil( Math.min( ctx.canvas.height, by1 * m.d + m.f + pad ) );
+		if ( dx1 <= dx0 || dy1 <= dy0 ) {
+			return;
+		}
+		const lw = dx1 - dx0;
+		const lh = dy1 - dy0;
+		if ( ! this.shade || this.shade.width < lw || this.shade.height < lh ) {
 			this.shade = document.createElement( 'canvas' );
-			this.shade.width = cv.width;
-			this.shade.height = cv.height;
+			this.shade.width = Math.max( lw, this.shade?.width || 0 );
+			this.shade.height = Math.max( lh, this.shade?.height || 0 );
 		}
 		const g = this.shade.getContext( '2d' );
 		g.setTransform( 1, 0, 0, 1, 0, 0 );
-		g.clearRect( 0, 0, cv.width, cv.height );
-		g.setTransform( ctx.getTransform() );
+		g.clearRect( 0, 0, lw, lh );
+		g.setTransform( m.a, m.b, m.c, m.d, m.e - dx0, m.f - dy0 );
 		g.shadowOffsetX = K * scale;
 		g.lineCap = 'round';
 		g.lineJoin = 'round';
 		g.strokeStyle = '#000';
 		g.fillStyle = '#000';
 		// Ferrule and handle: higher, so softer and fainter, tapering away.
-		const pts = [ F, E3, { x: lerp( E3.x, End3.x, 0.3 ), y: lerp( E3.y, End3.y, 0.3 ), z: lerp( E3.z, End3.z, 0.3 ) }, End3 ].map( ( p ) => fall( p.x, p.y, p.z ) );
 		const widths = [ ferW * 0.45, ferW * 0.45, ferW * 0.55, ferW * 0.25 ];
 		g.shadowColor = 'rgba(40,28,16,0.5)';
-		g.shadowBlur = ( 6 + hairL * 0.15 ) * scale;
+		g.shadowBlur = blurHandle;
 		g.beginPath();
 		const side = ( k, sgn ) => {
 			const a0 = pts[ Math.max( 0, k - 1 ) ];
@@ -958,7 +1082,7 @@ export class Director {
 		ctx.save();
 		ctx.setTransform( 1, 0, 0, 1, 0, 0 );
 		ctx.globalAlpha = 0.28;
-		ctx.drawImage( this.shade, 0, 0 );
+		ctx.drawImage( this.shade, 0, 0, lw, lh, dx0, dy0, lw, lh );
 		ctx.restore();
 		// Where the hairs press on the wet paper it darkens a little.
 		const c = br.contact;
@@ -984,10 +1108,18 @@ export class Director {
 		const c = document.createElement( 'canvas' );
 		c.width = this.overlay.width;
 		c.height = this.overlay.height;
-		const g = c.getContext( '2d' );
+		const g = c.getContext( '2d', { alpha: false } );
+		let last = 0;
 		this.recorder = {
 			canvas: c,
+			// The video runs at 30 fps: copying every screen frame would only
+			// cost time the painting needs.
 			frame: () => {
+				const now = performance.now();
+				if ( now - last < 1000 / 31 ) {
+					return;
+				}
+				last = now;
 				g.drawImage( paint, 0, 0, c.width, c.height );
 				g.drawImage( this.overlay, 0, 0 );
 			},

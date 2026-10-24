@@ -43,14 +43,10 @@ vec4 dens( vec2 uv ) {
 	vec2 p = uv * uSim - 0.5;
 	vec2 f = fract( p );
 	// Smooth (C1) blending between cells: no visible grid when seen up close.
+	// The GPU's own bilinear filter does the blend in one lookup, at the
+	// smoothed position between the four cells.
 	f = f * f * ( 3.0 - 2.0 * f );
-	ivec2 i0 = ivec2( floor( p ) );
-	ivec2 mx = ivec2( uSim ) - 1;
-	vec4 a = texelFetch( uDens, clamp( i0, ivec2( 0 ), mx ), 0 );
-	vec4 b = texelFetch( uDens, clamp( i0 + ivec2( 1, 0 ), ivec2( 0 ), mx ), 0 );
-	vec4 c = texelFetch( uDens, clamp( i0 + ivec2( 0, 1 ), ivec2( 0 ), mx ), 0 );
-	vec4 d = texelFetch( uDens, clamp( i0 + ivec2( 1, 1 ), ivec2( 0 ), mx ), 0 );
-	return mix( mix( a, b, f.x ), mix( c, d, f.x ), f.y );
+	return texture( uDens, ( floor( p ) + 0.5 + f ) / uSim );
 }
 
 vec3 toSrgb( vec3 c ) {
@@ -204,9 +200,12 @@ export class WatercolorRenderer {
 		}
 		this.densTex = gl.createTexture();
 		gl.bindTexture( gl.TEXTURE_2D, this.densTex );
-		gl.texImage2D( gl.TEXTURE_2D, 0, gl.RGBA32F, W, H, 0, gl.RGBA, gl.FLOAT, new Float32Array( W * H * 4 ) );
-		gl.texParameteri( gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST );
-		gl.texParameteri( gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST );
+		// Half floats: filterable on every WebGL2 GPU, and half the bandwidth.
+		gl.texImage2D( gl.TEXTURE_2D, 0, gl.RGBA16F, W, H, 0, gl.RGBA, gl.FLOAT, new Float32Array( W * H * 4 ) );
+		gl.texParameteri( gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR );
+		gl.texParameteri( gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR );
+		gl.texParameteri( gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE );
+		gl.texParameteri( gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE );
 		if ( this.errTex ) {
 			gl.deleteTexture( this.errTex );
 		}
@@ -259,6 +258,11 @@ export class WatercolorRenderer {
 	}
 
 	setCamera( x, y, w, h, fine = 0 ) {
+		const c = this.cam;
+		// A camera at rest costs nothing.
+		if ( c[ 0 ] === x && c[ 1 ] === y && c[ 2 ] === w && c[ 3 ] === h && this.fine === fine ) {
+			return;
+		}
 		this.cam = [ x, y, w, h ];
 		this.fine = fine;
 		this.needsDraw = true;

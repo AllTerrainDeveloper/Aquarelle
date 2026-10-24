@@ -397,7 +397,9 @@ export class GestureAnimator {
 			}
 			// In Cinematic a stroke is judged before the brush flies to it.
 			const lead = ( a.approach || a.fall || ( undefined !== a.launch ? a.start - a.launch : 0 ) ) + ( a.before ? a.before.dur : 0 );
-			if ( t >= a.start - lead && ( i < 4 || performance.now() < deadline ) ) {
+			// A brush stroke is always judged in time, even over budget: judged
+			// late, its trip could no longer be called off.
+			if ( t >= a.start - lead && ( i < 4 || ( 'brush' === a.tool && ! a.prepared ) || performance.now() < deadline ) ) {
 				if ( ! a.prepared ) {
 					a.prepared = true;
 					if ( a.blob && ! model.prepare( a.blob ) ) {
@@ -423,14 +425,22 @@ export class GestureAnimator {
 									nextTrip.segs[ 0 ].from = trip.segs[ 0 ].from;
 								}
 							}
-							// ...but never into the past: nothing may start already under way.
+							// ...but never into the past, nor while the brush is still busy
+							// (say, a trip to the palette already under way): nothing that
+							// moves up may start before the hand is free.
 							let soonest = Infinity;
+							let free = t;
 							for ( const b of this.actions ) {
-								if ( ( 'brush' === b.tool || 'dip' === b.tool ) && ! b.hidden && b.start > a.start ) {
+								if ( ( 'brush' !== b.tool && 'dip' !== b.tool ) || b.hidden || b === a ) {
+									continue;
+								}
+								if ( b.start > a.start ) {
 									soonest = Math.min( soonest, b.start - ( b.approach || 0 ) );
+								} else {
+									free = Math.max( free, b.start + b.dur );
 								}
 							}
-							saved = Math.max( 0, Math.min( saved, soonest - t ) );
+							saved = Math.max( 0, Math.min( saved, soonest - free ) );
 							for ( const b of this.actions ) {
 								if ( ( 'brush' === b.tool || 'dip' === b.tool ) && b.start > a.start ) {
 									b.start -= saved;

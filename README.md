@@ -37,14 +37,18 @@ tabs, then press **Paint** (it also pauses and resumes):
   next well. The brush's hairs are simulated (js/bristles.js): each is a short
   chain that springs back to a round brush's shape, clings to the others
   while wet, cannot pass through the paper, is held back by friction where
-  it touches and fans out when pressed. The hand only places and tilts the
-  ferrule, pressing harder until the touching hairs are as wide as the
-  paint, and steering them onto it. Wet washes catch the light. *Record
+  it touches and fans out when pressed; in the air the bundle travels with
+  its ferrule, so it does not swing about. The hand only places and tilts
+  the ferrule, pressing harder until the touching hairs are as wide as the
+  paint (a broad wash takes a bigger brush), and steering them onto it. Wet washes catch the light. *Record
   video* records what the camera sees. Everything moves on springs or eased
   paths (the brush is carried through the air between all marks and comes
   down onto the paper), the brush's tip sits on the paint as it is laid, the brush grows slowly for broad washes (capped on screen), it lifts clear off the sheet and over gaps, the camera frames each flight with its destination, and
   the sheet is rendered for the camera's view at screen resolution, so it
-  stays sharp up close.
+  stays sharp up close. The still parts of the desk are painted once and
+  reused, the brush's shadow is drawn only around the brush, and a slow
+  frame never cuts the camera back to the wide shot nor sends the brush
+  back from the palette before it has loaded.
   *Keep painting until similarity reaches* (85% by default): after the
   painting, Cinematic keeps refining the weakest areas, as Endless does,
   until the similarity score reaches the target; it also stops if nothing
