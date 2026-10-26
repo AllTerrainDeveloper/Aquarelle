@@ -608,6 +608,11 @@ export class AnimationController {
 				this.round++;
 				area.visits++;
 				this.layerName = `Refining the weakest area (${ area.col + 1 }, ${ area.row + 1 }), round ${ this.round }`;
+				// What it found and what it chose for it (e.g. "glaze 2, soften 1").
+				const tools = Object.entries( res.tools || {} ).map( ( [ k, n ] ) => `${ k } ${ n }` ).join( ', ' );
+				if ( tools ) {
+					this.layerName += ` · ${ tools }`;
+				}
 				if ( this.targetSim && this.lastScores ) {
 					this.layerName += ` · ${ this.lastScores.similarity.toFixed( 1 ) }% of ${ this.targetSim }%`;
 				}

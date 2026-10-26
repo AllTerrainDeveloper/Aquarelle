@@ -91,16 +91,30 @@ brush paints those marks instead (the splash code is kept).
 **Endless refinement:** after the painting, the picture is divided into a
 4×4 grid of areas scored by plain colour difference against the image (as
 the eye sees it, at fine and coarse scales). Each round goes to the area that
-looks least like it, judged on a fresh score taken after the last round,
-and works only there, guided by the measured
-error: where the painting is still lighter than the image it paints more
-(its colour, darker than planned if needed), where it is darker it lifts.
-Every third visit is a details pass. The painter never stays on one area:
-not the same one twice in a row, recent visits lower an area's priority,
-and an area that three visits in a row barely improved is set aside for a
-while. Each visit is stricter than the last;
-an area whose last two visits found nothing to do is finished, and when all
-are, it stops and says so. The live similarity score is shown throughout.
+looks least like it, judged on a fresh score taken after the last round.
+The painter never stays on one area: not the same one twice in a row,
+recent visits lower an area's priority, and an area that three visits in a
+row barely improved is set aside for a while. An area whose last two visits
+found nothing to do is finished, and when all are, it stops and says so.
+The live similarity score is shown throughout.
+
+Each round first **diagnoses** the area cell by cell, comparing the paint
+as it is with the image: too light, too dark, the wrong hue, an edge the
+painting lost (too soft), or variation it lacks (too flat). Then, for each
+problem patch, worst first, it **tries every tool** that could fix it in a
+prediction of what the paint would look like afterwards: strokes of the
+colour the patch needs (a dot for a speck), a glaze (one thin wet wash
+over the patch in one colour), wet-in-wet (clear water, then its colours
+charged in to blend softly), a fine re-cut along a lost edge, and lifts.
+The tool that brings the patch closest to the image for its time is used,
+if any helps (water's effect is the least certain, so a wet tool must
+promise more), and the prediction is updated before the next patch. The
+round's label says what it chose, for example "glaze 24, lift 16,
+stroke 3". Clear water to soften an edge that is too hard was tried as
+well; measured on paintings it did worse than leaving the edge (water on
+dried paint mostly makes backruns), so too-hard edges are left alone.
+Corrections other than glazes and wet-in-wet are made almost dry, so they
+stay where they are put.
 
 **Clear water:** like a watercolourist, the painter also works with a
 clean brush. Big soft zones (a sky, a background) are wetted first so their
