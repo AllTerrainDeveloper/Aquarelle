@@ -7,8 +7,15 @@
  * leads (the cells where it is the main colour). A level allows only the
  * first few of them: every other pigment's paint goes to the allowed one
  * closest to it in colour, at the same darkness, so the level is painted in
- * palette colours only. Each cell then belongs to its main allowed colour,
- * and any patch of a colour too small or too thin for that level (the
+ * palette colours only. But paint stays: a colour may only stand in for
+ * another that is nearly the same paint (see fits), which the true colour
+ * glazed on top later turns into the right one (a face is never washed in
+ * the sky's grey-green to be painted pink later). A group of colours with
+ * no stand-in in the level comes in with its own most prominent colour if,
+ * together, it leads as much of the picture as a colour of the level does
+ * (a face in four skin tones); a smaller one is left white and painted at a
+ * later level. Each cell then belongs to its main allowed colour, and any
+ * patch of a colour too small or too thin for that level (the
  * windows of a distant building, a thin branch, a speck) is given to the
  * neighbouring colour it shares the most border with, so the building is
  * one grey block. The level's paint targets are its (remapped) mixes,
@@ -30,6 +37,41 @@ import { gaussBlur, minFilter, maxFilter } from './image-analyzer.js';
 const LIGHT_KEEP = 0.15;
 /** Most distinct labels (pigments) the majority filter counts. */
 const MAX_LABELS = 64;
+/**
+ * How far apart two paints may be for one to be painted where the other
+ * belongs: the angle between their absorbances (per red, green, blue), so
+ * the same paint at any strength is one colour. Within it, the true colour
+ * glazed over the first later still comes out right (a pale skin tone under
+ * a deeper one); further apart, the first shows through for good (skin over
+ * a grey-green wash stays grey, over the hair's brown stays dull).
+ */
+const HUE_NEAR = Math.cos( ( 8 * Math.PI ) / 180 );
+/**
+ * ...or for a pale colour, how much off-colour paint (absorbance) the first
+ * may leave: a pale cream under a pale grey hardly shows.
+ */
+const FAINT = 0.05;
+/**
+ * A patch may also join a colour of another hue if that colour is this much
+ * lighter than the patch: the patch's own, darker colour covers it later.
+ */
+const COVER = 0.5;
+/** A patch set aside: left white at this level, painted at a later one. */
+const ASIDE = -2;
+
+/** How alike two paints' absorbances are (the cosine of their angle). */
+function alike( a, b ) {
+	const [ r1, g1, b1 ] = a.A;
+	const [ r2, g2, b2 ] = b.A;
+	const n = Math.hypot( r1, g1, b1 ) * Math.hypot( r2, g2, b2 );
+	return n ? ( r1 * r2 + g1 * g2 + b1 * b2 ) / n : 1;
+}
+
+/** Whether paint `a` may be laid where `b` belongs (HUE_NEAR, FAINT). */
+function fits( a, b ) {
+	const c = alike( a, b );
+	return c >= HUE_NEAR || ( ( b.A[ 0 ] + b.A[ 1 ] + b.A[ 2 ] ) / 3 ) * Math.sqrt( 1 - c * c ) <= FAINT;
+}
 
 /**
  * Builds the colour levels.
@@ -60,30 +102,54 @@ export function colourLevels( an, specs ) {
 	const paint = [ ...Array( K ).keys() ].filter( ( k ) => ! pigments[ k ].isPaper );
 	const order = paint.sort( ( a, b ) => lead[ b ] - lead[ a ] );
 	const levels = specs.map( ( spec ) => {
-		const colours = Math.max( Math.min( 2, order.length ), Math.min( order.length, Math.round( order.length * spec.share ) ) );
-		const allowed = order.slice( 0, colours );
+		const share = Math.max( Math.min( 2, order.length ), Math.min( order.length, Math.round( order.length * spec.share ) ) );
+		const allowed = order.slice( 0, share );
 		// Every other pigment's paint goes to the allowed one nearest in
-		// colour, at the same darkness.
+		// colour, at the same darkness, among those of nearly its hue.
 		const to = new Int16Array( K );
-		for ( let k = 0; k < K; k++ ) {
-			to[ k ] = k;
-			if ( pigments[ k ].isPaper || allowed.includes( k ) ) {
-				continue;
-			}
+		const nearest = ( k ) => {
+			let best = -1;
 			let bd = Infinity;
 			for ( const a of allowed ) {
-				const [ l1, a1, b1 ] = pigments[ k ].lab;
-				const [ l2, a2, b2 ] = pigments[ a ].lab;
-				const d = Math.hypot( l1 - l2, a1 - a2, b1 - b2 );
-				if ( d < bd ) {
-					bd = d;
-					to[ k ] = a;
+				if ( fits( pigments[ a ], pigments[ k ] ) ) {
+					const [ l1, a1, b1 ] = pigments[ k ].lab;
+					const [ l2, a2, b2 ] = pigments[ a ].lab;
+					const d = Math.hypot( l1 - l2, a1 - a2, b1 - b2 );
+					if ( d < bd ) {
+						bd = d;
+						best = a;
+					}
+				}
+			}
+			return best;
+		};
+		// Pigments with no stand-in, grouped by hue (most prominent first):
+		// a group leading as much as a colour of the level brings its leader
+		// in; the others' paint waits for a later level (-1).
+		const groups = [];
+		for ( const k of order ) {
+			if ( ! allowed.includes( k ) && nearest( k ) < 0 ) {
+				const g = groups.find( ( q ) => alike( pigments[ q.lead ], pigments[ k ] ) >= HUE_NEAR );
+				if ( g ) {
+					g.cells += lead[ k ];
+				} else {
+					groups.push( { lead: k, cells: lead[ k ] } );
 				}
 			}
 		}
+		const least = lead[ allowed[ allowed.length - 1 ] ];
+		for ( const g of groups ) {
+			if ( g.cells >= least ) {
+				allowed.push( g.lead );
+			}
+		}
+		const colours = allowed.length;
+		for ( let k = 0; k < K; k++ ) {
+			to[ k ] = pigments[ k ].isPaper || allowed.includes( k ) ? k : nearest( k );
+		}
 		const mixes = T0.map( ( m, k ) => ( to[ k ] === k ? Float32Array.from( m ) : new Float32Array( N ) ) );
 		for ( let k = 0; k < K; k++ ) {
-			if ( to[ k ] !== k ) {
+			if ( to[ k ] >= 0 && to[ k ] !== k ) {
 				const f = dark[ k ] / Math.max( 1e-3, dark[ to[ k ] ] );
 				const src = T0[ k ];
 				const dst = mixes[ to[ k ] ];
@@ -96,14 +162,16 @@ export function colourLevels( an, specs ) {
 		for ( let i = 0; i < N; i++ ) {
 			own[ i ] = reserve[ i ] ? -1 : mainColour( mixes, dark, pigments, i, K, K );
 		}
-		// How dark each cell is, and each colour's areas on average: a patch
-		// may only join a colour that is not darker than itself (see may).
+		// How dark each cell truly is, and each colour's areas on average: a
+		// patch may only join a colour that is not darker than itself (see
+		// may). True, not the level's: a colour left out of it (its paint
+		// waits) does not make its cells light.
 		const value = new Float32Array( N );
 		const sum = new Float64Array( K + 1 );
 		const cnt = new Float64Array( K + 1 );
 		for ( let i = 0; i < N; i++ ) {
 			for ( let k = 0; k < K; k++ ) {
-				value[ i ] += mixes[ k ][ i ] * dark[ k ];
+				value[ i ] += T0[ k ][ i ] * dark[ k ];
 			}
 			if ( own[ i ] >= 0 ) {
 				sum[ own[ i ] ] += value[ i ];
@@ -112,14 +180,22 @@ export function colourLevels( an, specs ) {
 		}
 		const tone = Float32Array.from( sum, ( v, l ) => ( cnt[ l ] ? v / cnt[ l ] : 0 ) );
 		const may = ( l, v ) => tone[ l ] <= v * ( 1 + LIGHT_KEEP ) + LIGHT_KEEP / 3;
+		// ...and only one its true colour (`truth`), glazed on top later,
+		// turns right: nearly its hue, or much lighter than it (bare paper
+		// always is).
+		const truth = new Int16Array( N );
+		for ( let i = 0; i < N; i++ ) {
+			truth[ i ] = mainColour( T0, dark, pigments, i, K, K );
+		}
+		const over = ( l, m, v ) => l >= K || m >= K || fits( pigments[ l ], pigments[ m ] ) || tone[ l ] <= v * COVER;
 		const label = majority( own, W, H, 2 );
-		// ...but only a light patch big enough to paint around (the same size
-		// at every level: paint laid over light paper early is there for
+		// Both rules only bind a patch big enough to paint around (the same
+		// size at every level: paint laid over light paper early is there for
 		// good): specks (lit windows, white flowers) still go, and come back
 		// with the details.
-		const keep = spec.keepArea;
-		dropThin( label, W, H, Math.floor( spec.minDepth / 2 ), value, may, keep );
-		absorbSmall( label, W, H, spec.minArea, value, may, keep );
+		const rules = { value, truth, may, over, keep: spec.keepArea };
+		dropThin( label, W, H, Math.floor( spec.minDepth / 2 ), rules );
+		absorbSmall( label, W, H, spec.minArea, rules, K );
 		return { colours, allowed, label, maps: smoothWithin( mixes, W, H, label, own, spec.sigma ) };
 	} );
 	return { order, levels };
@@ -204,9 +280,11 @@ function majority( src, W, H, passes ) {
  * big area (the gaps reach down into the field): what an opening of the
  * area's mask takes away. Those cells take the colour around them, growing
  * in from their neighbours, most common first, but never a darker one: a
- * cell with only darker colours around it keeps its own.
+ * cell with only darker colours around it keeps its own. (A thin part is a
+ * line or a gap, painted over later in its own, darker colour or kept
+ * light: the colour under a line does not show.)
  */
-function dropThin( label, W, H, r, value, may, keep ) {
+function dropThin( label, W, H, r, { value, may, keep } ) {
 	if ( r < 1 ) {
 		return;
 	}
@@ -314,10 +392,13 @@ function dropThin( label, W, H, r, value, may, keep ) {
  * Patches of a colour smaller than `minArea` cells join the neighbouring
  * colour they share the most border with, if it is not darker than the
  * patch (a lit window stays); smallest first, repeated until none is left.
+ * A patch with only neighbours of another hue around it (see `over`) is set
+ * aside: left white now, it gets its own colour at a later level.
  */
-function absorbSmall( label, W, H, minArea, value, may, keep ) {
+function absorbSmall( label, W, H, minArea, { value, truth, may, over, keep }, K ) {
 	const N = W * H;
 	const comp = new Int32Array( N );
+	const count = new Int32Array( K + 1 );
 	for ( let sweep = 0; sweep < 8; sweep++ ) {
 		comp.fill( -1 );
 		const parts = [];
@@ -371,15 +452,32 @@ function absorbSmall( label, W, H, minArea, value, may, keep ) {
 					}
 				}
 			}
+			// The patch's true colour: most of its cells'.
+			count.fill( 0 );
+			let own = K;
+			for ( const i of parts[ id ] ) {
+				if ( truth[ i ] >= 0 && ++count[ truth[ i ] ] > count[ own ] ) {
+					own = truth[ i ];
+				}
+			}
+			const big = parts[ id ].length >= keep;
 			let to = -1;
 			let bn = 0;
+			let aside = false;
 			for ( const [ l, n ] of border ) {
-				if ( n > bn && ( parts[ id ].length < keep || may( l, v ) ) ) {
+				if ( n > bn && ( ! big || may( l, v ) ) ) {
+					if ( big && ! over( l, own, v ) ) {
+						aside = true;
+						continue;
+					}
 					bn = n;
 					to = l;
 				}
 			}
-			if ( to >= 0 ) {
+			if ( to < 0 && aside ) {
+				to = ASIDE;
+			}
+			if ( to !== -1 ) {
 				for ( const i of parts[ id ] ) {
 					label[ i ] = to;
 				}
@@ -396,7 +494,11 @@ function absorbSmall( label, W, H, minArea, value, may, keep ) {
 /**
  * Per pigment, the image's mixes smoothed within each colour area, from the
  * cells that are truly that colour (not the absorbed ones); an area with no
- * such cell nearby takes the area's mean mix. Reserved cells keep the image.
+ * such cell nearby takes the area's mean mix. Reserved cells keep the image,
+ * and cells set aside stay white. The smoothing evens a colour out but never
+ * brings in paint from further away: a true cell gets no more of a pigment
+ * than the picture has close by (a sky glow next to the hair is not painted
+ * brown because both are mostly that brown).
  * The smoothing is wide, so it runs on a grid a few times coarser (block
  * sums) and is read back bilinearly.
  */
@@ -444,6 +546,9 @@ function smoothWithin( T0, W, H, label, own, sigma ) {
 		return a + ( b - a ) * fy;
 	};
 	const maps = T0.map( ( m ) => Float32Array.from( m ) );
+	const reach = Math.max( 1, Math.round( sigma / 4 ) );
+	const caps = new Array( K );
+	const cap = ( k ) => ( caps[ k ] ??= maxFilter( T0[ k ], W, H, reach ) );
 	// The cells of each colour area, listed once.
 	const buckets = new Map();
 	for ( let i = 0; i < N; i++ ) {
@@ -453,6 +558,13 @@ function smoothWithin( T0, W, H, label, own, sigma ) {
 				buckets.set( label[ i ], ( b = [] ) );
 			}
 			b.push( i );
+		}
+	}
+	for ( let i = 0; i < N; i++ ) {
+		if ( ASIDE === label[ i ] ) {
+			for ( let k = 0; k < K; k++ ) {
+				maps[ k ][ i ] = 0;
+			}
 		}
 	}
 	const w = new Uint8Array( N );
@@ -491,6 +603,7 @@ function smoothWithin( T0, W, H, label, own, sigma ) {
 			// A pigment hardly in this area at all: none of it (no blur needed).
 			const none = den && peak[ k ] < 0.01;
 			const num = den && ! none ? down( cells, w, src ) : null;
+			const most = none ? null : cap( k );
 			for ( const i of cells ) {
 				if ( none ) {
 					out[ i ] = 0;
@@ -500,6 +613,9 @@ function smoothWithin( T0, W, H, label, own, sigma ) {
 				const y = ( i / W ) | 0;
 				const d = den ? at( den, x, y ) : 0;
 				out[ i ] = d > floor ? at( num, x, y ) / d : mean[ k ];
+				if ( w[ i ] ) {
+					out[ i ] = Math.min( out[ i ], most[ i ] * ( 1 + LIGHT_KEEP ) + 0.01 );
+				}
 			}
 		}
 	}

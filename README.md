@@ -203,7 +203,15 @@ The palette's pigments are ranked by how much of the picture each one
 leads. The first wash allows only the most prominent third of them, the
 mid-tones two thirds, the glazes all; a pigment not yet allowed hands its
 paint to the allowed one nearest in colour, at the same darkness, so every
-pass uses palette colours only. Each cell belongs to its main colour, and
+pass uses palette colours only. Paint stays, though, so it never hands it
+to a colour that its own, glazed on top later, cannot turn right: only to
+one of the same paint at another strength (absorbances within 8° of each
+other) or, for a pale colour, one that leaves hardly any off-colour paint.
+A face in four skin tones is never washed in the sky's grey-green to be
+painted pink later. Colours left without a stand-in bring in their own most
+prominent one if, together, they lead as much of the picture as a colour
+of the level does (the face's skin tones); smaller ones are left white
+until a later level. Each cell belongs to its main colour, and
 at each level anything too small or too narrow for it is given to the
 colour around it: every part of an area narrower than the level allows
 (the gaps between buildings, a thin branch, a line), even where it joins
@@ -213,11 +221,16 @@ to a colour no darker than itself: a dark line waits for the details,
 while a light area big enough to paint around (the sky between two
 buildings) is kept and every pass paints around it; only light specks
 (lit windows, white flowers) still go, and come back with the details.
+Likewise a patch big enough to paint around only joins a colour its own
+can be glazed over (the same paint, or a much lighter colour that its own
+covers); with none around it is left white, to be painted at a later level.
 The areas grow finer level by level (minimum width about 4%, 2.4%
 and 1% of the sheet). The level's targets are its mixes smoothed within
 each colour area only, leaving out the absorbed cells, so the windows take
-the colour of the wall and gradients survive. Only the details and the
-finish aim at the full picture.
+the colour of the wall and gradients survive; the smoothing never brings
+in paint from further away than a few cells (a pale glow beside the hair
+is not painted brown because both are that brown's area). Only the
+details and the finish aim at the full picture.
 
 Each layer has its own **value target**: the image with every cell's
 pigment mix scaled so it is no darker than the layer's value (light, then
