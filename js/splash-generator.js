@@ -23,6 +23,9 @@ const CINE_APPROACH = 0.4;
 // from fine marks (size 0) to broad washes (size 1).
 const handSpeed = ( B, size ) => B * ( 0.08 + 0.22 * size );
 
+/** Water (h) above which paper counts as wet for a hard edge beside it. */
+const WET_BESIDE = 0.03;
+
 /**
  * Cinematic: the clean border a careful painter leaves around the sheet. Along
  * each edge the margin wanders (between about 1% and 3.5% of the sheet's long
@@ -47,6 +50,9 @@ export function makeBorder( W, H, seed ) {
 	const top = edge();
 	const bottom = edge();
 	return {
+		// The widest the border can get (a share of the long side): the brush
+		// lifts up to 1.25 times the margin from the edge, plus its tip.
+		reach: ( maxM * 1.3 ) / B,
 		room( x, y, scale = 1 ) {
 			return Math.min( x - left( y / H ) * scale, W - x - right( y / H ) * scale, y - top( x / W ) * scale, H - y - bottom( x / W ) * scale );
 		},
@@ -603,6 +609,36 @@ export class SplashGenerator {
 	}
 
 	/**
+	 * Where along a sweep's path the paper beside it is wet but not its
+	 * colour's (the sky still wet next to a building), if anywhere. Wet is
+	 * wet: even water whose pigment has settled lets new paint run into it.
+	 */
+	_wetBeside( op ) {
+		const { W, H, h } = this.model;
+		const pts = op.path;
+		let since = Infinity;
+		for ( let q = 0; q < pts.length; q += 3 ) {
+			const r = pts[ q + 2 ] + 2;
+			since += q ? Math.hypot( pts[ q ] - pts[ q - 3 ], pts[ q + 1 ] - pts[ q - 2 ] ) : 0;
+			if ( since < Math.max( 1, r * 0.5 ) ) {
+				continue;
+			}
+			since = 0;
+			const cx = pts[ q ];
+			const cy = pts[ q + 1 ];
+			const st = Math.max( 1, Math.floor( r / 4 ) );
+			for ( let y = Math.max( 0, Math.floor( cy - r ) ); y <= Math.min( H - 1, cy + r ); y += st ) {
+				for ( let x = Math.max( 0, Math.floor( cx - r ) ); x <= Math.min( W - 1, cx + r ); x += st ) {
+					if ( h[ y * W + x ] > WET_BESIDE && ! this.belongs( op.k, x, y ) ) {
+						return { x, y, r };
+					}
+				}
+			}
+		}
+		return null;
+	}
+
+	/**
 	 * Executes an op by scheduling its gestures. Returns false when the op
 	 * should be deferred (e.g. a dry-brush mark on a still-wet region).
 	 */
@@ -674,6 +710,17 @@ export class SplashGenerator {
 				return true;
 
 			case 'sweep':
+				// A wash with a hard edge waits until the paint of another colour
+				// beside it is dry (a painter lets the sky dry before cutting the
+				// buildings in against it), or the two bleed and every corner goes
+				// soft. The first wash is wet-in-wet on purpose.
+				if ( op.stage >= 1 && op.k >= 0 && ! op.force ) {
+					const wet = this._wetBeside( op );
+					if ( wet ) {
+						this.drying.helpDry( model, wet.x, wet.y, wet.r );
+						return false;
+					}
+				}
 				// One row-by-row pass of an object's wash, carried top to bottom.
 				this._brushAlong( rng, { ...op, trust: true, graded: true, shared: this._washMask( op.wash ) }, op.k );
 				return true;

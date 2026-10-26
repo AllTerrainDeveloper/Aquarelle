@@ -94,6 +94,11 @@ self.onmessage = ( e ) => {
 				reply( res, [ res.err.buffer, res.de.buffer, res.signed.buffer, res.errU8.buffer ] );
 				break;
 			}
+			case 'setMargin': {
+				evaluator.setMargin( msg.share );
+				reply( {} );
+				break;
+			}
 			case 'evaluateRendered': {
 				reply( { scores: evaluator.evaluateRendered( new Uint8Array( msg.pixels ), msg.w, msg.h ) } );
 				break;

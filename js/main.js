@@ -529,6 +529,8 @@ function selectTab( name, focus ) {
 	$( 'endlessOpts' ).hidden = 'endless' !== name;
 	$( 'customOpts' ).hidden = 'custom' !== name;
 	$( 'cinematicOpts' ).hidden = 'cinematic' !== name;
+	// Endless already keeps going: there the goal is where it stops.
+	$( 'untilSimLabel' ).textContent = 'endless' === name ? 'Stop once similarity reaches' : 'Keep painting until similarity reaches';
 	try {
 		localStorage.setItem( 'aquarelle-tab', name );
 	} catch ( err ) {}
@@ -566,7 +568,7 @@ for ( const b of tabButtons ) {
 }
 selectTab( tab );
 
-/** Cinematic's target similarity (%), kept between 50 and 99. */
+/** The target similarity (%), kept between 50 and 99. */
 function simTarget() {
 	const v = Math.round( Number( $( 'simTarget' ).value ) || 85 );
 	return Math.min( 99, Math.max( 50, v ) );
@@ -597,17 +599,18 @@ $( 'simTarget' ).addEventListener( 'change', ( e ) => {
 	} catch ( err ) {}
 } );
 
-/** The selected tab as a controller mode, the Endless flag and any target similarity. */
+/**
+ * The selected tab as a controller mode, the Endless flag and any target
+ * similarity. With the goal on, any tab paints, then refines (as Endless
+ * does) until the target; in Endless it is where the refining stops.
+ */
 function tabMode() {
+	const goal = $( 'untilSim' ).checked ? simTarget() : 0;
 	if ( 'endless' === tab ) {
 		const pace = document.querySelector( 'input[name="pace"]:checked' );
-		return { mode: pace ? pace.value : 'quick', endless: true };
+		return { mode: pace ? pace.value : 'quick', endless: true, target: goal };
 	}
-	if ( 'cinematic' === tab && $( 'untilSim' ).checked ) {
-		// Paints, then refines (as Endless does) until the target similarity.
-		return { mode: 'cinematic', endless: true, target: simTarget() };
-	}
-	return { mode: 'custom' === tab ? 'paint' : tab, endless: false };
+	return { mode: 'custom' === tab ? 'paint' : tab, endless: !! goal, target: goal };
 }
 
 /**
@@ -638,6 +641,8 @@ async function play() {
 		animation.setMode( mode, QUICK_SECONDS, endless, target );
 		// Cinematic leaves a clean border around the sheet, as a careful painter does.
 		session.splash.border = 'cinematic' === mode ? makeBorder( session.W, session.H, session.seed ) : null;
+		// ...which the similarity scores leave out: it is unpainted on purpose.
+		await call( 'setMargin', { share: session.splash.border ? session.splash.border.reach : 0 } );
 		syncCinematic();
 		director.reset();
 		animation.start();

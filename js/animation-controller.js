@@ -130,11 +130,12 @@ export class AnimationController {
 	 *   goes to the water jar and the palette between colours (see Director).
 	 * In 'quick' the simulation and every gesture speed up together, so the
 	 * drops, splashes and strokes all still show.
-	 * Endless (quick or realtime): after the layers, keep refining in rounds
-	 * against the paper as it is, each stricter than the last, until rounds
-	 * find nothing left to improve.
+	 * Endless (any mode): after the layers, keep refining in rounds against
+	 * the paper as it is, each stricter than the last, until rounds find
+	 * nothing left to improve. In 'paint' the refining carries on past the
+	 * chosen duration, at the playback speed.
 	 * `target` (similarity, %): with endless, stop as soon as the painting
-	 * scores that much (Cinematic's "until similarity" option).
+	 * scores that much (the "until similarity" option, in every tab).
 	 */
 	setMode( mode, quickSeconds = 20, endless = false, target = 0 ) {
 		this.mode = mode;
@@ -142,7 +143,7 @@ export class AnimationController {
 		this.timelapse = 'quick' === mode ? quickSeconds : 0;
 		// Open-ended: no time budget and no schedule, only the work.
 		this.openEnded = 'paint' !== mode;
-		this.endless = endless && this.openEnded;
+		this.endless = endless;
 		this.animator && ( this.animator.cinematic = 'cinematic' === mode );
 	}
 
@@ -571,7 +572,7 @@ export class AnimationController {
 		const cur = this.model.snapshotPigment();
 		const epoch = this.epoch = ( this.epoch || 0 ) + 1;
 		// Open-ended modes plan without time limits: they paint everything.
-		this.planLayer( { layer: idx, cur: cur.buffer, handX: this.splash.handX, handY: this.splash.handY, seed: refine ? 100 + this.round : idx, loaded: this.splash.loaded, unlimited: !! this.openEnded, round: area ? area.visits + 1 : 0, region: area ? area.region : null, signed: area ? this.errorField.signed.slice() : null, EW: this.errorField?.EW, EH: this.errorField?.EH }, [ cur.buffer ] ).then( ( res ) => {
+		this.planLayer( { layer: idx, cur: cur.buffer, handX: this.splash.handX, handY: this.splash.handY, seed: refine ? 100 + this.round : idx, loaded: this.splash.loaded, unlimited: !! this.openEnded || refine, round: area ? area.visits + 1 : 0, region: area ? area.region : null, signed: area ? this.errorField.signed.slice() : null, EW: this.errorField?.EW, EH: this.errorField?.EH }, [ cur.buffer ] ).then( ( res ) => {
 			if ( epoch !== this.epoch ) {
 				return; // restarted meanwhile
 			}
@@ -581,11 +582,11 @@ export class AnimationController {
 			// left, so later layers are never pushed past the end.
 			const span = res.ops.length ? res.ops[ res.ops.length - 1 ].t : 0;
 			const avail = Math.max( 0.04 * this.duration, L.t1 * this.duration - base );
-			const squeeze = span > avail && ! this.openEnded ? avail / span : 1;
+			const squeeze = span > avail && ! this.openEnded && ! refine ? avail / span : 1;
 			// Open-ended modes never sit idle: a long empty wait between two
 			// gestures (a splash planned late in the layer's time slot) is cut
 			// short. Brushwork queues on the hand anyway.
-			if ( this.openEnded ) {
+			if ( this.openEnded || refine ) {
 				res.ops.sort( ( a, b ) => a.t - b.t );
 				let prev = 0;
 				let shift = 0;

@@ -27,6 +27,7 @@ import { Rng } from './prng.js';
 import { depthInside, packDiscs, sweepStrokes, spineStrokes, orientedSweepStrokes, strokeAngle, softEdgeStrokes } from './composition-planner.js';
 import { minFilter, maxFilter, boxBlur, gaussBlur } from './image-analyzer.js';
 import { linearToOklab, PAPER_LINEAR } from './color.js';
+import { colourLevels } from './colour-levels.js';
 
 export const LAYERS = [
 	{ id: 'wash', name: 'First wash: light and loose', t0: 0.0, t1: 0.24 },
@@ -44,44 +45,33 @@ const V_MID = 1.0;
  * Shared, image-only context computed once (worker side).
  */
 export function layerContext( an, { duration, seed, fineDetail = { strokes: 1, fine: 1 } } ) {
-	const { W, H, B, pigments, T, edge } = an;
+	const { W, H, B, pigments, edge } = an;
 	const N = W * H;
 	const K = pigments.length;
 	const meanA = pigments.map( ( p ) => ( p.A[ 0 ] + p.A[ 1 ] + p.A[ 2 ] ) / 3 );
-	// What the big passes (first wash, mid-tones, glazes) paint: the picture
-	// without its fine detail. Each colour's small holes are closed (a
-	// building block without its windows, a sky without its thin branches)
-	// and its small specks removed; whatever that leaves empty takes the
-	// colour of its nearest neighbours, so no white is left behind. The
-	// details are painted on top at the end, as a painter does.
-	const rd = Math.max( 1, Math.round( B / 130 ) );
-	// Holes are filled only inside a solid area of the colour (a block
-	// around its windows), not in a lace of thin lines (a canopy of twigs,
-	// where the sky between them must stay sky).
-	const big = T[ 0 ].map( ( m, k ) => {
-		if ( pigments[ k ].isPaper ) {
-			return m;
-		}
-		const closed = minFilter( maxFilter( m, W, H, rd ), W, H, rd );
-		const local = boxBlur( m, W, H, rd * 2 );
-		const out = new Float32Array( N );
+	// What the big passes paint, coarse to fine (see ColourLevels): the
+	// first wash uses only the palette's most prominent third, each colour
+	// in big areas; the mid-tones two thirds in smaller areas; the glazes
+	// the whole palette, still without small patches (a distant building is
+	// one grey block, its windows come with the details). Only the details
+	// and the finish aim at the full picture, every colour and every speck.
+	const keepArea = ( B * 0.025 ) ** 2;
+	const { levels } = colourLevels( an, [
+		{ share: 1 / 3, minArea: ( B * 0.07 ) ** 2, minDepth: B * 0.02, keepArea, sigma: B * 0.04 },
+		{ share: 2 / 3, minArea: ( B * 0.045 ) ** 2, minDepth: B * 0.012, keepArea, sigma: B * 0.025 },
+		{ share: 1, minArea: ( B * 0.03 ) ** 2, minDepth: B * 0.01, keepArea, sigma: B * 0.012 },
+	] );
+	const big = levels.map( ( l ) => l.maps );
+	// Target darkness per cell (all pigments) of each big pass.
+	const D = big.map( ( maps ) => {
+		const d = new Float32Array( N );
 		for ( let i = 0; i < N; i++ ) {
-			const cov = closed[ i ] > 1e-4 ? local[ i ] / closed[ i ] : 0;
-			const s = Math.min( 1, Math.max( 0, ( cov - 0.5 ) / 0.3 ) );
-			out[ i ] = m[ i ] + Math.max( 0, closed[ i ] - m[ i ] ) * s;
+			for ( let k = 0; k < K; k++ ) {
+				d[ i ] += maps[ k ][ i ] * meanA[ k ];
+			}
 		}
-		return maxFilter( minFilter( out, W, H, rd ), W, H, rd );
+		return d;
 	} );
-	fillFromNearest( big, T[ 0 ], an.reserve, pigments, W, H, Math.max( 8, 4 * rd ) );
-	// Target darkness per cell (all pigments) of the big passes.
-	const D = new Float32Array( N );
-	for ( let i = 0; i < N; i++ ) {
-		let d = 0;
-		for ( let k = 0; k < K; k++ ) {
-			d += big[ k ][ i ] * meanA[ k ];
-		}
-		D[ i ] = d;
-	}
 	// Where the image has a real edge within reach (cut-in happens only there).
 	const strongOff = new Uint8Array( N );
 	for ( let i = 0; i < N; i++ ) {
@@ -93,9 +83,6 @@ export function layerContext( an, { duration, seed, fineDetail = { strokes: 1, f
 	for ( let i = 0; i < N; i++ ) {
 		edgeNear[ i ] = far[ i ] <= er ? 1 : 0;
 	}
-	// Shadow masses: the full target opened at a modest scale (no fine detail).
-	const rs = Math.max( 2, Math.round( B / 90 ) );
-	const shadow = T[ 0 ].map( ( m, k ) => ( pigments[ k ].isPaper ? m : maxFilter( minFilter( m, W, H, rs ), W, H, rs ) ) );
 	// Lightness gradients (smoothed) for each shape's stroke direction.
 	const Ls = new Float32Array( N );
 	for ( let i = 0; i < N; i++ ) {
@@ -111,19 +98,20 @@ export function layerContext( an, { duration, seed, fineDetail = { strokes: 1, f
 			gy[ i ] = Lb[ i + W ] - Lb[ i - W ];
 		}
 	}
-	return { an, W, H, B, N, K, meanA, D, big, edgeNear, shadow, duration, seed, fineDetail, gx, gy };
+	return { an, W, H, B, N, K, meanA, D, big, colours: levels.map( ( l ) => l.allowed ), edgeNear, duration, seed, fineDetail, gx, gy };
 }
 
 /** The value target of a layer, per pigment (K arrays) and as density. */
 function layerTarget( ctx, layer ) {
-	const { an, N, K, meanA, D, shadow, big } = ctx;
+	const { an, N, K, meanA } = ctx;
 	const T0 = an.T[ 0 ];
 	const target = new Float32Array( K * N );
 	for ( let k = 0; k < K; k++ ) {
 		const off = k * N;
 		// The big passes paint the picture without its fine detail; the
 		// details and the finish aim at the full picture.
-		const t0 = layer <= 2 ? big[ k ] : T0[ k ];
+		const t0 = layer <= 2 ? ctx.big[ layer ][ k ] : T0[ k ];
+		const D = layer <= 2 ? ctx.D[ layer ] : null;
 		for ( let i = 0; i < N; i++ ) {
 			let v;
 			if ( 0 === layer ) {
@@ -131,9 +119,10 @@ function layerTarget( ctx, layer ) {
 			} else if ( 1 === layer ) {
 				v = t0[ i ] * Math.min( 1, V_MID / Math.max( 1e-3, D[ i ] ) );
 			} else if ( 2 === layer ) {
-				// A photo's darks are big areas (foliage, silhouettes): its glazes
-				// take them to full depth; the detail brush only handles small things.
-				v = an.photo ? t0[ i ] : Math.max( shadow[ k ][ i ], t0[ i ] * Math.min( 1, V_MID / Math.max( 1e-3, D[ i ] ) ) );
+				// The glazes take the big areas (without their fine detail) to full
+				// depth: a head of dark hair is finished here, before the detail
+				// brush starts on small things.
+				v = t0[ i ];
 			} else {
 				v = t0[ i ];
 			}
@@ -151,6 +140,84 @@ function layerTarget( ctx, layer ) {
 	return { target, dens };
 }
 
+/** Share of the details layer's time the edge re-cut may take. */
+const EDGE_BUDGET = 0.25;
+
+/**
+ * Edge re-cut: the painter sharpens the silhouettes at the end. The broad
+ * washes leave a soft, rounded rim where the image has a crisp edge (a
+ * rooftop, a building's side against the sky): there the paper is still
+ * lighter than the image just inside the dark side of the edge. That rim
+ * (the dark side of a strong step in value, within a couple of cells of
+ * it) is traced with the fine tip in the colour it needs, as one stroke
+ * along the edge, so the corner comes back square.
+ *
+ * @return {Object[]} shapes { k, strokes, secs, mass, x, y } for the details pass
+ */
+function edgeRecut( ctx, { target, dens, room, need, reserve, budget } ) {
+	const { an, W, H, B, N, K } = ctx;
+	const { pigments, importance } = an;
+	// How far from the edge the rim reaches (cells), and how big a step in
+	// value counts as a crisp edge.
+	const reach = Math.max( 1, Math.round( B / 160 ) );
+	const lightNear = minFilter( dens, W, H, reach );
+	const rim = new Uint8Array( N );
+	for ( let i = 0; i < N; i++ ) {
+		const step = dens[ i ] - lightNear[ i ];
+		const have = dens[ i ] - room( i );
+		if ( ! reserve[ i ] && step > 0.25 && step > 0.35 * dens[ i ] && have < dens[ i ] * 0.85 ) {
+			rim[ i ] = 1;
+		}
+	}
+	const out = [];
+	for ( const cells of components( rim, W, H, Math.max( 4, reach * 3 ) ) ) {
+		const sums = new Float64Array( K );
+		let imp = 0;
+		for ( const i of cells ) {
+			imp += importance[ i ];
+			for ( let k = 0; k < K; k++ ) {
+				if ( ! pigments[ k ].isPaper ) {
+					sums[ k ] += need( k, i );
+				}
+			}
+		}
+		let k1 = 0;
+		for ( let k = 1; k < K; k++ ) {
+			if ( sums[ k ] > sums[ k1 ] ) {
+				k1 = k;
+			}
+		}
+		if ( sums[ k1 ] / cells.length < 0.05 ) {
+			continue;
+		}
+		const strokes = spineStrokes( cells, W, { maxStrokes: 6 } ).filter( ( st ) => st.len >= reach * 2 );
+		if ( ! strokes.length ) {
+			continue;
+		}
+		let secs = 0;
+		for ( const st of strokes ) {
+			// A fine tip: never wider than the rim.
+			for ( let q = 2; q < st.pts.length; q += 3 ) {
+				st.pts[ q ] = Math.min( st.pts[ q ], reach * 0.9 + 0.4 );
+			}
+			st.r = Math.min( st.r, reach * 0.9 + 0.4 );
+			secs += strokeSecs( B, st, st.r );
+		}
+		out.push( { k: k1, strokes, secs, mass: ( imp / cells.length ) * sums[ k1 ], ...centroid( cells, W ) } );
+	}
+	// The most visible edges first, within the time.
+	out.sort( ( a, b ) => b.mass - a.mass );
+	const keep = [];
+	let used = 0;
+	for ( const e of out ) {
+		if ( used + e.secs <= budget ) {
+			used += e.secs;
+			keep.push( e );
+		}
+	}
+	return keep;
+}
+
 /**
  * Closes small holes and gaps in a mask (dilate, then erode): a photo's
  * field strewn with flowers is washed as one field, the flowers come later.
@@ -163,62 +230,6 @@ function closeMask( mask, W, H, r, reserve ) {
 		out[ i ] = c[ i ] > 0.5 && ! reserve[ i ] ? 1 : 0;
 	}
 	return out;
-}
-
-/**
- * Cells where the detail-free map lost what the picture has there (a thin
- * dark branch removed, nothing filled in) take the average colour of their
- * nearest kept neighbours, growing in from all sides.
- */
-function fillFromNearest( big, full, reserve, pigments, W, H, maxSteps ) {
-	const N = W * H;
-	const K = big.length;
-	const dens = ( maps, i ) => {
-		let d = 0;
-		for ( let k = 0; k < K; k++ ) {
-			if ( ! pigments[ k ].isPaper ) {
-				d += maps[ k ][ i ] * ( pigments[ k ].A[ 0 ] + pigments[ k ].A[ 1 ] + pigments[ k ].A[ 2 ] );
-			}
-		}
-		return d;
-	};
-	let pending = new Uint8Array( N );
-	let left = 0;
-	for ( let i = 0; i < N; i++ ) {
-		const df = dens( full, i );
-		if ( ! reserve[ i ] && df > 0.3 && dens( big, i ) < 0.3 * df ) {
-			pending[ i ] = 1;
-			left++;
-		}
-	}
-	const acc = new Float32Array( K );
-	for ( let step = 0; step < maxSteps && left > 0; step++ ) {
-		const next = pending.slice();
-		for ( let i = 0; i < N; i++ ) {
-			if ( ! pending[ i ] ) {
-				continue;
-			}
-			const x = i % W;
-			acc.fill( 0 );
-			let n = 0;
-			for ( const j of [ x > 0 ? i - 1 : -1, x < W - 1 ? i + 1 : -1, i - W, i + W ] ) {
-				if ( j >= 0 && j < N && ! pending[ j ] && ! reserve[ j ] ) {
-					for ( let k = 0; k < K; k++ ) {
-						acc[ k ] += big[ k ][ j ];
-					}
-					n++;
-				}
-			}
-			if ( n ) {
-				for ( let k = 0; k < K; k++ ) {
-					big[ k ][ i ] = acc[ k ] / n;
-				}
-				next[ i ] = 0;
-				left--;
-			}
-		}
-		pending = next;
-	}
 }
 
 /** How deep the deepest cell of a shape lies (distance to its border). */
@@ -975,6 +986,12 @@ export function planLayer( ctx, layer, state ) {
 				imp += importance[ i ];
 				ex -= room( i );
 			}
+			// A speck a little too dark is left alone (lifting hundreds of them
+			// reads as dots over unfinished areas); only a real light patch, or
+			// a small one that matters (a catch-light in an eye), is lifted.
+			if ( cells.length < ( B * 0.01 ) ** 2 && ( imp / cells.length < 0.6 || ex / cells.length < 0.4 ) ) {
+				continue;
+			}
 			const c = centroid( cells, W );
 			lights.push( { cells, ...c, r: Math.min( B * 0.03, Math.sqrt( cells.length / Math.PI ) + 0.8 ), mass: ( imp / cells.length ) * Math.min( 2, ex / cells.length ) * Math.sqrt( cells.length ) } );
 		}
@@ -1149,32 +1166,44 @@ export function planLayer( ctx, layer, state ) {
 				chosen.push( s );
 			}
 		}
-		// Keep to the brush: the colour already loaded first, then always the
-		// closest colour. Within each colour big to small, as a painter does:
-		// trunk and main branches, then smaller branches, twigs, leaves and
-		// dabs last; nearest next within each size.
+		const edges = rg ? [] : edgeRecut( ctx, { target, dens, room, need, reserve, budget: budget * EDGE_BUDGET } );
+		// Big before small, as a painter does: first every colour's large
+		// shapes (what is left of a head of hair, a trunk and main branches),
+		// so no big area is still unfinished while fine work goes on; then
+		// the silhouettes are re-cut (see edgeRecut); then the smaller
+		// branches, twigs, leaves and dabs. Within each pass keep to the
+		// brush: the colour already loaded first, then always the closest
+		// colour, big to small and nearest next within each colour.
 		const size = ( sh ) => sh.strokes.reduce( ( acc, st ) => acc + st.len, 0 );
 		let t = 0.3 + liftEnd;
-		for ( const k of colourChain( chosen.map( ( sh ) => sh.k ), pigments, state.loaded ) ) {
-			const mine = chosen.filter( ( c ) => c.k === k );
-			const tiers = [
-				mine.filter( ( sh ) => size( sh ) >= B * 0.1 ),
-				mine.filter( ( sh ) => size( sh ) < B * 0.1 && size( sh ) >= B * 0.03 ),
-				mine.filter( ( sh ) => size( sh ) < B * 0.03 ),
-			];
-			for ( const tier of tiers ) {
-				for ( const sh of walk( tier, hx, hy ) ) {
-					if ( sh.dab ) {
-						ops.push( dab( k, sh, t, pigments, rng ) );
-						t += DAB_SECS;
+		let loaded = state.loaded;
+		const passes = [ chosen.filter( ( sh ) => size( sh ) >= B * 0.1 ), edges, chosen.filter( ( sh ) => size( sh ) < B * 0.1 ) ];
+		for ( const pass of passes ) {
+			const chain = colourChain( pass.map( ( sh ) => sh.k ), pigments, loaded );
+			for ( const k of chain ) {
+				const mine = pass.filter( ( c ) => c.k === k );
+				const tiers = [
+					mine.filter( ( sh ) => size( sh ) >= B * 0.1 ),
+					mine.filter( ( sh ) => size( sh ) < B * 0.1 && size( sh ) >= B * 0.03 ),
+					mine.filter( ( sh ) => size( sh ) < B * 0.03 ),
+				];
+				for ( const tier of tiers ) {
+					for ( const sh of walk( tier, hx, hy ) ) {
+						if ( sh.dab ) {
+							ops.push( dab( k, sh, t, pigments, rng ) );
+							t += DAB_SECS;
+						}
+						for ( const st of sh.strokes ) {
+							ops.push( spine( k, st, t, 0.95, 0.12, rng ) );
+							t += strokeSecs( B, st, st.r );
+						}
+						hx = sh.x;
+						hy = sh.y;
 					}
-					for ( const st of sh.strokes ) {
-						ops.push( spine( k, st, t, 0.95, 0.12, rng ) );
-						t += strokeSecs( B, st, st.r );
-					}
-					hx = sh.x;
-					hy = sh.y;
 				}
+			}
+			if ( chain.length ) {
+				loaded = chain[ chain.length - 1 ];
 			}
 		}
 	} else {

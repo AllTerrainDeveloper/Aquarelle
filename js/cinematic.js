@@ -32,6 +32,9 @@ const smooth = ( a, b, x ) => {
 	return t * t * ( 3 - 2 * t );
 };
 const lerp = ( a, b, t ) => a + ( b - a ) * t;
+// The brush's resting hold: the handle up and to the right of the tip.
+const BRUSH_YAW = Math.atan2( 0.12, 0.42 );
+const BRUSH_TILT = Math.acos( 0.86 / Math.hypot( 0.42, 0.12, 0.86 ) );
 const norm3 = ( a ) => {
 	const l = Math.hypot( a.x, a.y, a.z ) || 1;
 	return { x: a.x / l, y: a.y / l, z: a.z / l };
@@ -169,12 +172,19 @@ export class Director {
 		this.bear = undefined;
 		this.corr = { x: 0, y: 0 };
 		this.lean = { x: 0, y: 0 };
+		// How the brush is held: re-gripped a little differently for each
+		// stroke (yaw round the vertical and tilt from it, in radians).
+		this.grip = { yaw: 0, tilt: 0, wantYaw: 0, wantTilt: 0, rnd: mulberry32( 11 ) };
+		// The hand's flight lags its plan on a loose spring (see _moveHand).
+		this.fly = null;
 		if ( this.br ) {
 			this.br.ready = false;
 		}
 		this.color = CLEAN.slice();
 		this.load = 0;
+		// The rinse water: the colour that clouds it, and how much (0 clear).
 		this.water = WATER.slice();
+		this.stain = 0;
 		this.swirl = { parts: [], energy: 0, spawn: 0, at: null, rnd: mulberry32( 5 ) };
 		this.idleFor = 10;
 		this.dipSeen = null;
@@ -358,6 +368,12 @@ export class Director {
 		const off = this.off;
 		// Only a change of gesture can jump; within one, the path is continuous.
 		if ( T.id !== raw.id ) {
+			if ( T.stroke ) {
+				// Each stroke, the fingers settle on the handle a little differently.
+				const g = this.grip;
+				g.wantYaw = ( g.rnd() - 0.5 ) * 0.42;
+				g.wantTilt = ( g.rnd() - 0.5 ) * 0.22;
+			}
 			if ( Math.hypot( T.x - raw.x, T.y - raw.y ) > S * 0.004 ) {
 				off.x += raw.x - T.x;
 				off.y += raw.y - T.y;
@@ -374,9 +390,30 @@ export class Director {
 		this.raw = { x: T.x, y: T.y, lift: T.lift, id: T.id };
 		const px = h.x;
 		const py = h.y;
+		const lift = Math.max( 0, T.lift + off.lift );
 		h.x = T.x + off.x;
 		h.y = T.y + off.y;
-		const lift = Math.max( 0, T.lift + off.lift );
+		// A hand in the air is not a machine: it trails its flight on a loose
+		// spring (overshooting a little where the path turns or stops), sways
+		// off the straight line, and comes back onto the plan to land. On the
+		// paper (and at the jar and the palette) it follows the plan exactly.
+		// (Eased, so arriving over the jar or a well never jumps; touching
+		// down, it is back on the plan within a few frames, before the drawn
+		// tip, which follows the lift more slowly, meets the paper.)
+		const airWant = T.dip ? 0 : smooth( 0.02, 0.5, lift );
+		h.air = undefined === h.air ? airWant : h.air + ( airWant - h.air ) * ( 1 - Math.exp( -dt / ( airWant < h.air ? 0.06 : 0.3 ) ) );
+		const air = h.air;
+		const fly = this.fly || ( this.fly = { x: h.x, y: h.y, vx: 0, vy: 0 } );
+		const w = 2 * Math.PI * 1.6;
+		const sdt = Math.min( dt, 1 / 30 );
+		fly.vx += ( w * w * ( h.x - fly.x ) - 2 * 0.62 * w * fly.vx ) * sdt;
+		fly.vy += ( w * w * ( h.y - fly.y ) - 2 * 0.62 * w * fly.vy ) * sdt;
+		fly.x += fly.vx * sdt;
+		fly.y += fly.vy * sdt;
+		const nt = this.time * 0.5;
+		const sway = S * 0.01 * air;
+		h.x += ( fly.x - h.x ) * air + ( valueNoise( nt, 3.7, 41 ) - 0.5 ) * 2 * sway;
+		h.y += ( fly.y - h.y ) * air + ( valueNoise( 8.1, nt, 43 ) - 0.5 ) * 2 * sway;
 		h.lift = undefined === h.lift ? lift : h.lift + ( lift - h.lift ) * ( 1 - Math.exp( -dt / 0.14 ) );
 		const pc = this.pc;
 		const vx = ( ( h.x - px ) * pc ) / Math.max( dt, 1e-3 );
@@ -419,10 +456,12 @@ export class Director {
 		// The brush's colour: what it last took up.
 		if ( T.dip ) {
 			if ( 'rinse' === T.seg ) {
-				if ( this.dipSeen !== this._dipId( t ) ) {
-					this.dipSeen = this._dipId( t );
-					// The rinse water takes a little of the colour.
-					this.water = mixRgb( this.water, this.color, this.load > 0.05 ? 0.1 : 0 );
+				// The paint coming off the hairs stains the water strongly, in
+				// the brush's colour (mixed with what clouds it already).
+				if ( this.load > 0.03 ) {
+					const take = Math.max( 1 - Math.exp( -dt * 3 ), 1 - this.stain );
+					this.water = mixRgb( this.water, this.color, take );
+					this.stain = Math.min( 1, this.stain + dt * 1.4 * ( 0.4 + this.load ) );
 				}
 				// Rinsing washes the hairs clean (the jar keeps the colour).
 				this.color = mixRgb( this.color, CLEAN, 1 - Math.exp( -dt * 5 ) );
@@ -485,6 +524,14 @@ export class Director {
 	_flowJar( dt ) {
 		const sw = this.swirl;
 		sw.energy *= Math.exp( -dt / 2 );
+		// Left alone, the pigment settles and the water clears again while
+		// the brush is away painting.
+		if ( ! ( this.target && 'rinse' === this.target.seg ) ) {
+			this.stain *= Math.exp( -dt / 4 );
+		}
+		// The water turns with the stir, faster near the middle (so the
+		// stain winds into curls), and slows as the stir dies down.
+		sw.turn = ( sw.turn || 0 ) + dt * ( 0.12 + 1.6 * sw.energy );
 		const T = this.time * 0.25;
 		const n = ( x, y ) => valueNoise( x * 2.2 + T, y * 2.2 - T * 0.7, 23 );
 		const e = 0.05;
@@ -849,6 +896,64 @@ export class Director {
 		ctx.restore();
 	}
 
+	/**
+	 * The stain in the jar, a small picture (smoothed up when drawn): clear
+	 * water and the rinsed colour marbled together by curl noise. The water
+	 * coordinates are turned with the stir (more in the middle) and warped by
+	 * the noise's curl, so the colour winds into tendrils between clear
+	 * streaks; the more stained the jar, the more of it the colour fills.
+	 */
+	_stainTexture() {
+		const N = 64;
+		if ( ! this.stainCanvas ) {
+			this.stainCanvas = document.createElement( 'canvas' );
+			this.stainCanvas.width = N;
+			this.stainCanvas.height = N;
+			this.stainImg = this.stainCanvas.getContext( '2d' ).createImageData( N, N );
+		}
+		const px = this.stainImg.data;
+		const [ r, g, b ] = this.water;
+		const st = this.stain;
+		const turn = this.swirl.turn || 0;
+		const T = this.time * 0.2;
+		const n = ( x, y, k ) => valueNoise( x, y, k );
+		const e = 0.08;
+		for ( let j = 0; j < N; j++ ) {
+			for ( let i = 0; i < N; i++ ) {
+				let x = ( ( i + 0.5 ) / N ) * 2 - 1;
+				let y = ( ( j + 0.5 ) / N ) * 2 - 1;
+				const rr = Math.hypot( x, y );
+				const o = ( j * N + i ) * 4;
+				if ( rr > 1.05 ) {
+					px[ o + 3 ] = 0;
+					continue;
+				}
+				// The stir: a turn that winds the middle round more than the edge.
+				const a = turn * ( 1.3 - rr );
+				const ca = Math.cos( a );
+				const sa = Math.sin( a );
+				const u = x * ca - y * sa;
+				const v = x * sa + y * ca;
+				x = u * 1.8 + T;
+				y = v * 1.8 - T * 0.6;
+				// Curl warp: along the noise's level lines, so it curls.
+				const cx = ( n( x, y + e, 61 ) - n( x, y - e, 61 ) ) / ( 2 * e );
+				const cy = -( n( x + e, y, 61 ) - n( x - e, y, 61 ) ) / ( 2 * e );
+				const m = 0.65 * n( x * 1.6 + cx * 0.35, y * 1.6 + cy * 0.35, 67 ) + 0.35 * n( x * 3.4 + cx * 0.5, y * 3.4 + cy * 0.5, 71 );
+				// Colour where the marbling says so (more of it as the stain
+				// builds), over a faint tint of the whole jar.
+				const lo = 0.58 - 0.3 * st;
+				const c = smooth( lo, lo + 0.3, m );
+				px[ o ] = r;
+				px[ o + 1 ] = g;
+				px[ o + 2 ] = b;
+				px[ o + 3 ] = 255 * st * ( 0.3 + 0.6 * c );
+			}
+		}
+		this.stainCanvas.getContext( '2d' ).putImageData( this.stainImg, 0, 0 );
+		return this.stainCanvas;
+	}
+
 	/** The water in the jar, clouded by rinsing, its curls and the glass rim. */
 	_drawJarWater( ctx ) {
 		const s = this.scss;
@@ -857,8 +962,8 @@ export class Director {
 		const jy = J.y * s;
 		const jr = J.r * s;
 		const wg = ctx.createRadialGradient( jx - jr * 0.25, jy - jr * 0.3, 0, jx, jy, jr * 0.9 );
-		wg.addColorStop( 0, rgba( mixRgb( this.water, [ 255, 255, 255 ], 0.45 ), 0.9 ) );
-		wg.addColorStop( 1, rgba( mixRgb( this.water, [ 60, 70, 80 ], 0.15 ), 0.95 ) );
+		wg.addColorStop( 0, rgba( mixRgb( WATER, [ 255, 255, 255 ], 0.45 ), 0.9 ) );
+		wg.addColorStop( 1, rgba( mixRgb( WATER, [ 60, 70, 80 ], 0.15 ), 0.95 ) );
 		ctx.fillStyle = wg;
 		ctx.beginPath();
 		ctx.arc( jx, jy, jr * 0.88, 0, Math.PI * 2 );
@@ -867,6 +972,10 @@ export class Director {
 		ctx.beginPath();
 		ctx.arc( jx, jy, jr * 0.88, 0, Math.PI * 2 );
 		ctx.clip();
+		if ( this.stain > 0.01 ) {
+			ctx.imageSmoothingEnabled = true;
+			ctx.drawImage( this._stainTexture(), jx - jr * 0.88, jy - jr * 0.88, jr * 1.76, jr * 1.76 );
+		}
 		// The stirred water: each curl a trail, fading and thinning toward its
 		// tail; the colour spreads (wider, fainter) as it ages.
 		ctx.lineCap = 'round';
@@ -936,16 +1045,27 @@ export class Director {
 		// a little quicker.
 		const bear = 1 - Math.exp( -dt / ( touching < ( this.bear ?? 0 ) ? RELEASE_EASE : PRESS_EASE ) );
 		this.bear = undefined === this.bear ? touching : this.bear + ( touching - this.bear ) * bear;
-		// The handle leans up and to the right, pulled along the motion; a
-		// living hand is never quite still.
-		const tremor = Math.sin( this.time * 3.1 ) * 0.004 + Math.sin( this.time * 1.7 + 1 ) * 0.006;
+		// The handle leans up and to the right, held as a person holds it: the
+		// grip changes a little from stroke to stroke, the wrist drifts slowly
+		// and is never quite still, more so while flying.
+		const g = this.grip;
+		const gf = 1 - Math.exp( -dt / 0.45 );
+		g.yaw += ( g.wantYaw - g.yaw ) * gf;
+		g.tilt += ( g.wantTilt - g.tilt ) * gf;
+		const nt = this.time;
+		const nz = ( x, k ) => ( valueNoise( x, k, 59 ) - 0.5 ) * 2;
+		const air = smooth( 0.05, 0.5, lift );
+		const shake = 0.012 + 0.02 * air * Math.min( 1, h.speed / 400 );
+		const yaw = BRUSH_YAW + g.yaw + nz( nt * 0.32, 1.3 ) * 0.14 + nz( nt * 5.5, 7.9 ) * shake;
+		const tilt = Math.min( 0.78, Math.max( 0.2, BRUSH_TILT + g.tilt + nz( nt * 0.27, 4.1 ) * 0.08 + nz( nt * 6.3, 2.2 ) * shake * 0.7 ) );
 		// The lean comes with real speed only, and changes slowly, so the brush
 		// never swings about on a curved flight.
 		const pull = Math.min( 1, h.speed / 250 );
 		const lf = 1 - Math.exp( -dt / 0.35 );
 		this.lean.x += ( ( h.dirX || 0 ) * pull - this.lean.x ) * lf;
 		this.lean.y += ( ( h.dirY || 0 ) * pull - this.lean.y ) * lf;
-		const A = norm3( { x: 0.42 + this.lean.x * 0.2 + tremor, y: 0.12 + this.lean.y * 0.2 + tremor * 0.5, z: 0.86 } );
+		const st = Math.sin( tilt );
+		const A = norm3( { x: st * Math.cos( yaw ) + this.lean.x * 0.26, y: st * Math.sin( yaw ) + this.lean.y * 0.26, z: Math.cos( tilt ) } );
 		const down = { x: -A.x, y: -A.y, z: -A.z };
 		const br = this.br;
 		const c = br.contact;

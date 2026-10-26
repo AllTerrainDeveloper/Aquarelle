@@ -34,7 +34,9 @@ tabs, then press **Paint** (it also pauses and resumes):
   moving in close for fine marks and pulling back for washes and while paint
   dries. Between colours, and whenever it runs dry, the brush goes to the
   jar to rinse (the colour comes off in curls carried by a curl-noise flow,
-  and the water clouds with what is rinsed) and loads up in the
+  and stains the water strongly in the brush's colour, marbled with clear
+  water by curl noise and wound into swirls by the stir; while the brush is
+  away painting the pigment settles and the water clears) and loads up in the
   next well. The brush's hairs are simulated (js/bristles.js): each is a short
   chain that springs back to a round brush's shape, clings to the others
   while wet, cannot pass through the paper, is held back by friction where
@@ -43,7 +45,14 @@ tabs, then press **Paint** (it also pauses and resumes):
   the ferrule, pressing harder until the touching hairs are as wide as the
   paint (a broad wash takes a bigger brush), and steering them onto it.
   Lifting off, the pressure eases away while the hairs still drag on the
-  paper, so the splayed bundle closes up gradually before the brush rises. Wet washes catch the light. *Record
+  paper, so the splayed bundle closes up gradually before the brush rises.
+  The brush is held as a person holds it, not by a robot arm: the grip
+  changes a little from stroke to stroke (the handle's angle round and
+  from the vertical), the wrist drifts slowly and is never quite still
+  (more so in fast flights), and in the air the hand trails its planned
+  flight on a loose spring, overshooting a little where the path turns or
+  stops and swaying off the straight line. It is back on the plan before
+  the tip meets the paper, so the paint still goes exactly where planned. Wet washes catch the light. *Record
   video* records what the camera sees. Everything moves on springs or eased
   paths (the brush is carried through the air between all marks and comes
   down onto the paper), the brush's tip sits on the paint as it is laid, the brush grows slowly for broad washes (capped on screen), it lifts clear off the sheet and over gaps, the camera frames each flight with its destination, and
@@ -54,14 +63,20 @@ tabs, then press **Paint** (it also pauses and resumes):
   back from the palette before it has loaded.
   Like a careful painter, the brush lifts short of the sheet's edges,
   leaving a clean border whose width wanders along each edge and from
-  stroke to stroke (refinement leaves it alone too). *High resolution*
+  stroke to stroke (refinement leaves it alone too, and the similarity
+  score leaves it out: only the sheet inside the border's widest reach is
+  compared with the image). *High resolution*
   paints on a grid twice as fine (up to 960 cells on the long side), so
   paint stays crisp when the camera moves in close; it needs a faster
   computer.
-  *Keep painting until similarity reaches* (85% by default): after the
-  painting, Cinematic keeps refining the weakest areas, as Endless does,
-  until the similarity score reaches the target; it also stops if nothing
-  is left to improve, and says whether the target was reached.
+
+*Keep painting until similarity reaches* (under the tabs, for every mode;
+85% by default): after the painting, it keeps refining the weakest areas,
+as Endless does, until the similarity score reaches the target; it also
+stops if nothing is left to improve, and says whether the target was
+reached. In Custom the refining carries on past the chosen time, at the
+playback speed; in Endless the option reads *Stop once similarity
+reaches* and ends the refining early at the target.
 
 In the open-ended modes (Quick, Endless, Real time, Cinematic) marks that
 are due wait in a small pool, and the painter takes the next one as the hand
@@ -97,10 +112,10 @@ real edge) so the colour fades out instead of stopping hard.
 (photo)" or "Auto (illustration)") and can be forced. A photograph is
 painted the way a painter simplifies one: the image is first reduced to
 flat shapes (repeated edge-preserving smoothing in OKLab, and pigment maps
-smoothed within those shapes). The big passes (first wash, mid-tones,
-glazes) paint the picture *without* its fine detail: each colour's small
-holes are closed and its small specks removed, so a building block goes
-down whole without its windows and a field without its flowers. The first
+smoothed within those shapes). The big passes paint the picture *without*
+its fine detail, coarse to fine (see *Colour levels* below), so a building
+block goes down whole without its windows and a field without its
+flowers. The first
 wash is laid in broad colour zones (sky, glow, ground), the glazes take the
 big dark masses to full depth, and strokes follow the form. Only then does
 the details layer add the fine work: it lifts the paint off spots that must
@@ -151,19 +166,56 @@ for that moment of stepping back.
    real edges with one continuous stroke, then gently wavering rows top to
    bottom with rounded turns.
 3. **Shadow glazes.** The same pigments again, only over the parts that
-   should be darker (the shadow masses), so values build in steps and a few
-   pigments make gradients. Edges are not retraced.
+   should be darker, taking the big areas (without their fine detail) to
+   full depth, so a head of dark hair is finished before any detail work
+   starts. Values build in steps and a few pigments make gradients. Edges
+   are not retraced.
 4. **Darks and details.** A small brush for thin or small shapes, ranked by
-   how important and dark they are (eyes, brows, lettering first). Each is
-   one stroke from tip to tip along the shape's spine; a pupil gets a short
-   touch.
+   how important and dark they are (eyes, brows, lettering first). Big
+   before small: every colour's larger shapes go in first, then the small
+   strokes and dabs. Between the two, the silhouettes are re-cut: where
+   the image has a crisp edge (a rooftop, a building's side) and the
+   broad washes left a soft, lighter rim just inside its dark side, the
+   fine tip traces that rim in the colour it needs, so corners come back
+   square. Each is one stroke from tip to tip along the shape's spine; a
+   pupil gets a short touch. Light spots inside dark paint are
+   lifted out first, but only real light patches or small ones that matter
+   (a catch-light), not every speck that came out a little too dark.
 5. **Finish.** Lift a highlight or two where the paper went too dark.
+
+**Colour levels** (js/colour-levels.js): the big passes see the picture
+as a painter first does, a few dominant colours in big areas, then more.
+The palette's pigments are ranked by how much of the picture each one
+leads. The first wash allows only the most prominent third of them, the
+mid-tones two thirds, the glazes all; a pigment not yet allowed hands its
+paint to the allowed one nearest in colour, at the same darkness, so every
+pass uses palette colours only. Each cell belongs to its main colour, and
+at each level anything too small or too narrow for it is given to the
+colour around it: every part of an area narrower than the level allows
+(the gaps between buildings, a thin branch, a line), even where it joins
+a big area, and every patch smaller than the level's minimum (windows,
+specks). But watercolour only goes darker, so a patch is only ever given
+to a colour no darker than itself: a dark line waits for the details,
+while a light area big enough to paint around (the sky between two
+buildings) is kept and every pass paints around it; only light specks
+(lit windows, white flowers) still go, and come back with the details.
+The areas grow finer level by level (minimum width about 4%, 2.4%
+and 1% of the sheet). The level's targets are its mixes smoothed within
+each colour area only, leaving out the absorbed cells, so the windows take
+the colour of the wall and gradients survive. Only the details and the
+finish aim at the full picture.
 
 Each layer has its own **value target**: the image with every cell's
 pigment mix scaled so it is no darker than the layer's value (light, then
 mid, then shadow masses, then everything). The pigment model enforces it
 per cell, counting all paint already there, so a gesture can only bring
-the paper up to the layer's value, never past it. Nothing is trimmed to the
+the paper up to the layer's value, never past it. A mid-tone or glaze
+wash waits while the paper beside its path is wet but not its colour's
+(even water whose pigment has settled lets new paint run in), and the
+painter works elsewhere and comes back, so it does not bleed into it.
+A wash's brush lifts between two parts of a row whose straight join
+would leave the shape, so it never carries paint across a gap (the sky
+between two tall buildings). Nothing is trimmed to the
 image: drops are one tone with their own ragged outline, brush strokes paint
 exactly the ribbon the tip sweeps, and gestures are sized and placed so they
 fit. Water spreading into dry paper carries little pigment, so washes do not

@@ -739,6 +739,16 @@ export function sweepStrokes( cells, W, w, seam, o, maxSamples = 260 ) {
 		const li = at( lx, ly );
 		return local[ li ] && ( depth[ li ] >= w * 0.5 || ! strong( lx, ly ) );
 	};
+	// Whether the straight line between two local points leaves the shape.
+	const leaves = ( ax, ay, bx, by ) => {
+		const n = Math.ceil( Math.hypot( bx - ax, by - ay ) );
+		for ( let q = 1; q < n; q++ ) {
+			if ( ! local[ at( ax + ( ( bx - ax ) * q ) / n, ay + ( ( by - ay ) * q ) / n ) ] ) {
+				return true;
+			}
+		}
+		return false;
+	};
 	let raw = [];
 	let lastX = 0;
 	let lastY = 0;
@@ -771,7 +781,10 @@ export function sweepStrokes( cells, W, w, seam, o, maxSamples = 260 ) {
 			const from = row & 1 ? a1 : a0;
 			const to = row & 1 ? a0 : a1;
 			const gy = ly + y0 - 1;
-			if ( raw.length && Math.hypot( from + x0 - 1 - lastX, gy - lastY ) > w * 3 ) {
+			// The brush lifts between two runs that are far apart, or whose
+			// straight join leaves the shape (a notch of sky between two tall
+			// buildings): carried across, it would paint the gap.
+			if ( raw.length && ( Math.hypot( from + x0 - 1 - lastX, gy - lastY ) > w * 3 || leaves( lastX - x0 + 1, lastY - y0 + 1, from, ly ) ) ) {
 				flush();
 			}
 			const n = Math.max( 1, Math.ceil( Math.abs( to - from ) / Math.max( 0.6, w * 0.5 ) ) );

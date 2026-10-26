@@ -62,8 +62,6 @@
 					</div>
 				</div>
 				<div class="field" id="cinematicOpts" hidden>
-					<label class="check"><input type="checkbox" id="untilSim"> Keep painting until similarity reaches</label>
-					<label class="inline" for="simTarget"><input type="number" id="simTarget" min="50" max="99" step="1" value="85"> %</label>
 					<label class="check"><input type="checkbox" id="hires"> High resolution (sharper up close, needs a faster computer)</label>
 				</div>
 				<div id="customOpts" hidden>
@@ -76,6 +74,10 @@
 						<input type="range" id="speed" min="0" max="8" value="2">
 					</div>
 				</div>
+			</div>
+			<div class="field sim-goal">
+				<label class="check"><input type="checkbox" id="untilSim"> <span id="untilSimLabel">Keep painting until similarity reaches</span></label>
+				<label class="inline" for="simTarget"><input type="number" id="simTarget" min="50" max="99" step="1" value="85"> %</label>
 			</div>
 			<div class="buttons">
 				<button id="start" type="button" class="primary" disabled>Paint</button>
