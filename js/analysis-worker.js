@@ -85,7 +85,7 @@ self.onmessage = ( e ) => {
 				break;
 			}
 			case 'planLayer': {
-				const res = planLayer( layerCtx, msg.layer, { cur: new Float32Array( msg.cur ), handX: msg.handX, handY: msg.handY, seed: msg.seed, loaded: msg.loaded, unlimited: msg.unlimited, round: msg.round, region: msg.region, signed: msg.signed ? new Float32Array( msg.signed ) : null, EW: msg.EW, EH: msg.EH } );
+				const res = planLayer( layerCtx, msg.layer, { cur: new Float32Array( msg.cur ), handX: msg.handX, handY: msg.handY, seed: msg.seed, loaded: msg.loaded, unlimited: msg.unlimited, round: msg.round, fresh: msg.fresh, region: msg.region, off: msg.off, signed: msg.signed ? new Float32Array( msg.signed ) : null, de: msg.de ? Float32Array.from( msg.de ) : null, EW: msg.EW, EH: msg.EH } );
 				reply( res, [ res.target.buffer, res.dens.buffer ] );
 				break;
 			}

@@ -360,17 +360,38 @@ const OFF_FLAT = 0.02;
 const WET_WAIT = 2.5;
 // Seconds a wet-in-wet charge takes the hand.
 const WET_SECS = 1.6;
+// A refinement round: the most hand time it may use (seconds), and how many
+// of the worst problems it weighs fixes for.
+const ROUND_SECS = 60;
+const ROUND_PROBLEMS = 400;
+// The widest a problem patch is fixed in one go (share of the sheet).
+const PIECE = 0.1;
+// The evaluator's colour difference the eye forgives, and how wide (share
+// of the sheet) its error map is smoothed to tell where the painting looks
+// wrong.
+const SEEN_OK = 3.5;
+const SEEN_BLUR = 0.02;
+// How sure a tool's track record starts: as if it had delivered what it
+// promised on this many typical fixes.
+const TRUST_PRIOR = 3;
+// How much each round's measurement counts against the older ones.
+const TRUST_KEEP = 0.8;
 
 /**
- * An Endless (or similarity goal) refinement round on one area. It looks at
- * the painting as it is against the image, cell by cell, and finds what is
- * wrong where: too light, too dark, the wrong hue, an edge the painting
- * lost (too soft), or variation the painting lacks (too flat). For each problem patch, every tool that
+ * An Endless (or similarity goal) refinement round. It looks at the painting
+ * as it is against the image, cell by cell over the whole sheet (or the
+ * round's area), and finds what is wrong where: too light, too dark, the
+ * wrong hue, an edge the painting lost (too soft), or variation the painting
+ * lacks (too flat). For each of the worst problem patches, every tool that
  * could fix it is tried in a prediction (a stroke or wash of the colour it
- * needs, a glaze, wet-in-wet, a fine re-cut, lifts),
- * and the one that brings the patch closest to the image is used, if any
- * helps. Each choice updates the prediction, so the next is judged on the
- * paper as it will be.
+ * needs, a glaze, wet-in-wet, a fine re-cut, lifts). The fixes are then made
+ * best first by what they gain for their time, wherever they are, until the
+ * round's time is used: a glaring patch beside good paper is not averaged
+ * away, and where a fix pays off decides where the painter goes. Each
+ * fix updates the prediction, so the next is judged on the paper as it will
+ * be. The next round measures what each fix really did: tools that promise
+ * more than they deliver on this painting are trusted less, and a spot a
+ * fix did nothing for counts less.
  *
  * @return {{ ops: Object[], target: Float32Array, dens: Float32Array, tools: Object }}
  */
@@ -382,6 +403,73 @@ function refineArea( ctx, state, { target, dens, inArea, rng } ) {
 	const rg = state.region;
 	const work = state.cur.slice();
 	const look = predictor( ctx );
+	// How much a cell's colour counts: where it shows (importance), and far
+	// more where the painting visibly looks wrong around it (the evaluator's
+	// error map, smoothed a little: a patch, not a speck), so that fixing a
+	// glaring patch beside good paper beats polishing what is nearly right.
+	const wt = new Float32Array( N );
+	{
+		let vis = null;
+		if ( state.de ) {
+			const { EW, EH } = state;
+			const ex = gaussBlur( Float32Array.from( state.de, ( v ) => Math.max( 0, v - SEEN_OK ) ** 2 ), EW, EH, SEEN_BLUR * Math.max( EW, EH ) );
+			let mean = 0;
+			for ( const v of ex ) {
+				mean += v / ex.length;
+			}
+			vis = ( i ) => ex[ Math.min( EH - 1, ( ( i / W ) | 0 ) >> 1 ) * EW + Math.min( EW - 1, ( i % W ) >> 1 ) ] / Math.max( 1e-6, mean );
+		}
+		for ( let i = 0; i < N; i++ ) {
+			wt[ i ] = ( 0.5 + importance[ i ] ) * ( vis ? 1 + vis( i ) : 1 );
+		}
+	}
+	const shown = ( cells ) => {
+		let d = 0;
+		for ( const i of cells ) {
+			d += look.dist( work, i ) * wt[ i ];
+		}
+		return d;
+	};
+	// What the last round's fixes really did, measured on the paper as it is
+	// now against what each promised: a tool's track record (the tool that
+	// keeps delivering less than it promises is trusted less), and the cells
+	// where a fix did next to nothing (tried again, they count less).
+	if ( state.fresh || ! ctx.refined ) {
+		ctx.refined = { trust: {}, stuck: new Uint8Array( N ), last: [] };
+	}
+	const rec = ctx.refined;
+	for ( const t of Object.values( rec.trust ) ) {
+		t.got *= TRUST_KEEP;
+		t.promised *= TRUST_KEEP;
+		t.n *= TRUST_KEEP;
+	}
+	for ( const f of rec.last ) {
+		// With the weights it was judged by.
+		let now = 0;
+		f.cells.forEach( ( i, j ) => ( now += look.dist( work, i ) * f.wts[ j ] ) );
+		const got = f.before - now;
+		if ( got < 0.3 * f.gain ) {
+			for ( const i of f.cells ) {
+				rec.stuck[ i ] = Math.min( 3, rec.stuck[ i ] + 1 );
+			}
+		}
+		// Fixes that overlapped another of their round are not told apart.
+		if ( ! f.shared ) {
+			const t = ( rec.trust[ f.tool ] ??= { got: 0, promised: 0, n: 0 } );
+			t.got += got;
+			t.promised += f.gain;
+			t.n++;
+		}
+	}
+	rec.last = [];
+	const trust = ( tool ) => {
+		const t = rec.trust[ tool ];
+		if ( ! t || t.n < 0.5 ) {
+			return 1;
+		}
+		const prior = ( TRUST_PRIOR * t.promised ) / t.n;
+		return Math.max( 0.1, Math.min( 1.5, ( t.got + prior ) / ( t.promised + prior ) ) );
+	};
 	// The area, with a margin for edges and blurs.
 	const m = 3;
 	const x0 = Math.max( 0, rg.x0 - m );
@@ -464,14 +552,35 @@ function refineArea( ctx, state, { target, dens, inArea, rng } ) {
 		}
 	}
 	// Problem patches, worst first (how far off they are, where it shows).
+	// A patch wider than PIECE of the sheet comes in tile-sized pieces, each
+	// its own problem: one fix never sweeps half the sheet (a whole field
+	// glazed for a few wrong flowers), and each piece is weighed on its own.
+	const piece = Math.max( 4, Math.round( B * PIECE ) );
 	const problems = [];
 	for ( const kind of KINDS ) {
-		for ( const cells of components( masks[ kind ], W, H, { flat: 12, soft: 6 }[ kind ] || 3 ) ) {
-			let bad = 0;
-			for ( const i of cells ) {
-				bad += look.dist( work, i ) * ( 0.5 + importance[ i ] );
+		const least = { flat: 12, soft: 6 }[ kind ] || 3;
+		for ( const comp of components( masks[ kind ], W, H, least ) ) {
+			const box = boxOf( comp, W );
+			let parts = [ comp ];
+			if ( box.x1 - box.x0 >= piece || box.y1 - box.y0 >= piece ) {
+				const tiles = new Map();
+				for ( const i of comp ) {
+					const key = Math.floor( ( i % W ) / piece ) * 1e5 + Math.floor( ( i / W ) / piece );
+					let t = tiles.get( key );
+					if ( ! t ) {
+						tiles.set( key, ( t = [] ) );
+					}
+					t.push( i );
+				}
+				parts = [ ...tiles.values() ].filter( ( t ) => t.length >= least );
 			}
-			problems.push( { kind, cells, bad, ...centroid( cells, W ) } );
+			for ( const cells of parts ) {
+				let bad = 0;
+				for ( const i of cells ) {
+					bad += look.dist( work, i ) * wt[ i ];
+				}
+				problems.push( { kind, cells, bad, ...centroid( cells, W ) } );
+			}
 		}
 	}
 	problems.sort( ( a, b ) => b.bad - a.bad );
@@ -593,8 +702,7 @@ function refineArea( ctx, state, { target, dens, inArea, rng } ) {
 	const gainOf = ( fx ) => {
 		let g = 0;
 		for ( const [ i, vals ] of fx ) {
-			const w = 0.5 + importance[ i ];
-			g += ( look.dist( work, i ) - look.distOf( vals, i ) ) * w;
+			g += ( look.dist( work, i ) - look.distOf( vals, i ) ) * wt[ i ];
 		}
 		return g;
 	};
@@ -726,38 +834,85 @@ function refineArea( ctx, state, { target, dens, inArea, rng } ) {
 		}
 		return out;
 	};
-	// Each problem gets the tool that helps it most, if any does.
+	// Every problem's best fix, ranked across the whole sheet by what it is
+	// expected to gain for its time: the prediction, scaled by the tool's
+	// track record, and by half for each time a fix already did nothing
+	// there. The best fix is taken, the paper as predicted updated, and any
+	// fix it changed the cells of weighed again before it is taken (a lazy
+	// queue). (Wet fixes need no spacing here: the painter waits for wet
+	// paper beside a stroke before painting next to it.)
+	const best = ( p ) => {
+		const before = shown( p.cells );
+		let stuck = 0;
+		for ( const i of p.cells ) {
+			stuck += rec.stuck[ i ] / p.cells.length;
+		}
+		let pick = null;
+		let bestScore = 0;
+		let gain = 0;
+		for ( const c of candidates( p ) ) {
+			const g = gainOf( c.fx );
+			// A little more time is worth it only for a little more gain.
+			const score = ( g * trust( c.tool ) * 0.5 ** stuck ) / ( 1 + 0.05 * c.secs );
+			// Water's effect is the least certain: it must promise more.
+			if ( g > ( c.wet ? 0.08 : 0.02 ) * before && score > bestScore ) {
+				bestScore = score;
+				pick = c;
+				gain = g;
+			}
+		}
+		return pick ? { p, c: pick, score: bestScore, gain, at: commits } : null;
+	};
 	const ops = [];
 	const tools = {};
 	let t = 0.3;
 	let spent = 0;
-	const budget = state.unlimited ? Infinity : 30;
-	for ( const p of problems.slice( 0, 60 ) ) {
-		let before = 0;
-		for ( const i of p.cells ) {
-			before += look.dist( work, i ) * ( 0.5 + importance[ i ] );
-		}
-		let best = null;
-		let bestGain = 0;
-		for ( const c of candidates( p ) ) {
-			const g = gainOf( c.fx );
-			// A little more time is worth it only for a little more gain.
-			const score = g / ( 1 + 0.05 * c.secs );
-			// Water's effect is the least certain: it must promise more.
-			if ( g > ( c.wet ? 0.08 : 0.02 ) * before && score > bestGain ) {
-				bestGain = score;
-				best = c;
+	let commits = 0;
+	const stamp = new Int32Array( N );
+	const owner = new Int32Array( N ).fill( -1 );
+	const taken = [];
+	const queue = problems.slice( 0, ROUND_PROBLEMS ).map( best ).filter( Boolean );
+	while ( queue.length && spent < ROUND_SECS ) {
+		let top = 0;
+		for ( let q = 1; q < queue.length; q++ ) {
+			if ( queue[ q ].score > queue[ top ].score ) {
+				top = q;
 			}
 		}
-		if ( ! best || spent + best.secs > budget ) {
+		const e = queue[ top ];
+		queue[ top ] = queue[ queue.length - 1 ];
+		queue.pop();
+		const cells = [ ...e.c.fx.keys() ];
+		if ( cells.some( ( i ) => stamp[ i ] > e.at ) ) {
+			const again = best( e.p );
+			if ( again ) {
+				queue.push( again );
+			}
 			continue;
 		}
-		commit( best.fx );
-		ops.push( ...best.ops( t ) );
-		t += best.secs + 0.2;
-		spent += best.secs;
-		tools[ best.tool ] = ( tools[ best.tool ] || 0 ) + 1;
+		if ( spent + e.c.secs > ROUND_SECS ) {
+			continue;
+		}
+		const fix = { tool: e.c.tool, cells, wts: Float32Array.from( cells, ( i ) => wt[ i ] ), before: shown( cells ), gain: e.gain, shared: false };
+		for ( const i of cells ) {
+			if ( owner[ i ] >= 0 ) {
+				fix.shared = true;
+				taken[ owner[ i ] ].shared = true;
+			}
+		}
+		commit( e.c.fx );
+		commits++;
+		for ( const i of cells ) {
+			stamp[ i ] = commits;
+			owner[ i ] = taken.length;
+		}
+		taken.push( fix );
+		ops.push( ...e.c.ops( t ) );
+		t += e.c.secs + 0.2;
+		spent += e.c.secs;
+		tools[ e.c.tool ] = ( tools[ e.c.tool ] || 0 ) + 1;
 	}
+	rec.last = taken;
 	// Corrections are made almost dry (they stay where they are put), except
 	// the tools whose point is the water: glazes and wet-in-wet.
 	for ( const op of ops ) {
@@ -1012,12 +1167,14 @@ export function planLayer( ctx, layer, state ) {
 	// smaller differences count as work still to do.
 	const round = state.round || 0;
 	const strict = 1 + 0.3 * round;
-	// A refinement round may work on one area only (cells x0..x1, y0..y1).
+	// A refinement round may work on one area only (cells x0..x1, y0..y1),
+	// and leaves the cells marked `off` alone (Cinematic's border).
 	const rg = state.region;
+	const off = state.off;
 	const inArea = rg ? ( i ) => {
 		const x = i % W;
 		const y = ( i / W ) | 0;
-		return x >= rg.x0 && x <= rg.x1 && y >= rg.y0 && y <= rg.y1;
+		return x >= rg.x0 && x <= rg.x1 && y >= rg.y0 && y <= rg.y1 && ! off?.[ i ];
 	} : () => true;
 	const { target, dens } = layerTarget( ctx, layer );
 	// Endless refinement is driven by how the painting actually compares

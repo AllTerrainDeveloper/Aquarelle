@@ -54,6 +54,8 @@ const CLEAN = [ 120, 88, 56 ];
 const MAX_HAIR_PX = 54;
 // Camera: the closest it goes (on small details), and how far ahead it looks.
 const MAX_ZOOM = 2.4;
+// The closing shot: how much of the view the whole painting fills.
+const FINALE_FILL = 0.94;
 const LOOKAHEAD = 2.5;
 // Broad washes take a bigger brush: up to this much bigger, and this long on screen.
 const MAX_GROW = 2.4;
@@ -189,6 +191,16 @@ export class Director {
 		this.idleFor = 10;
 		this.dipSeen = null;
 		this.time = 0;
+		// The closing shot: the whole painting, centred (see showWhole).
+		this.finale = false;
+	}
+
+	/**
+	 * The closing shot, when a similarity goal is met: the camera glides to
+	 * the whole painting, centred and as large as fits the view.
+	 */
+	showWhole() {
+		this.finale = true;
 	}
 
 	/** A new painting: its pigments and the desk around its sheet. */
@@ -623,7 +635,12 @@ export class Director {
 		// and the wells), and only on the way back looks at the work ahead.
 		const toPalette = T.dip && 'move' === T.seg;
 		const box = rinsing ? null : toPalette ? { x0: h.x, y0: h.y, x1: h.x, y1: h.y } : this._workBox( t );
-		if ( rinsing ) {
+		if ( this.finale ) {
+			// The whole sheet, centred, filling the view (with a little air).
+			const L0 = this.layout;
+			focus = { x: ( L0.Wn * s ) / 2, y: ( L0.Hn * s ) / 2 };
+			zoom = FINALE_FILL * Math.min( vw / ( L0.Wn * s ), vh / ( L0.Hn * s ) );
+		} else if ( rinsing ) {
 			// At the palette, framing the jar and the wells.
 			focus = { x: ( L.jar.x + L.tray.x + L.tray.w / 2 ) * 0.5 * s, y: ( L.jar.y + L.tray.y + L.tray.h * 0.5 ) * 0.5 * s };
 			zoom = 1.5;
@@ -650,7 +667,9 @@ export class Director {
 			( { focus, zoom } = this.framing );
 		}
 		const keep = ( f, lo, hi, half ) => ( hi - lo <= 2 * half ? ( lo + hi ) / 2 : Math.min( hi - half, Math.max( lo + half, f ) ) );
-		focus = { x: keep( focus.x, b.x0, b.x1, vw / ( 2 * zoom ) ), y: keep( focus.y, b.y0, b.y1, vh / ( 2 * zoom ) ) };
+		if ( ! this.finale ) {
+			focus = { x: keep( focus.x, b.x0, b.x1, vw / ( 2 * zoom ) ), y: keep( focus.y, b.y0, b.y1, vh / ( 2 * zoom ) ) };
+		}
 		if ( ! this.cam ) {
 			this.cam = { x: centre.x, y: centre.y, vx: 0, vy: 0, lz: 0, vz: 0, z: 1 };
 		}
@@ -671,7 +690,7 @@ export class Director {
 		c.z = Math.exp( c.lz );
 		// Keep the brush well inside the frame: if it nears an edge, the camera
 		// is drawn along with it (smoothly, in proportion to how far out it is).
-		if ( h ) {
+		if ( h && ! this.finale ) {
 			const margin = 0.18;
 			const pull = 1 - Math.exp( -dt / 0.25 );
 			const ex = ( h.x * pc - c.x ) * c.z;

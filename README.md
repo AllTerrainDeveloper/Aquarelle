@@ -71,12 +71,15 @@ tabs, then press **Paint** (it also pauses and resumes):
   computer.
 
 *Keep painting until similarity reaches* (under the tabs, for every mode;
-85% by default): after the painting, it keeps refining the weakest areas,
-as Endless does, until the similarity score reaches the target; it also
-stops if nothing is left to improve, and says whether the target was
-reached. In Custom the refining carries on past the chosen time, at the
-playback speed; in Endless the option reads *Stop once similarity
-reaches* and ends the refining early at the target.
+85% by default): after the painting, it keeps refining, as Endless does,
+until the similarity score reaches the target. A score that stays the same
+(to its first decimal) for 30 minutes of painting also counts as the
+target: the painting has gone as far as it will. It also stops if nothing
+is left to improve, and says which it was. In Custom the refining carries
+on past the chosen time, at the playback speed; in Endless the option reads
+*Stop once similarity reaches* and ends the refining early at the target.
+In Cinematic, once the target is met (either way) the camera glides back to
+the whole painting, centred and as large as fits the view.
 
 In the open-ended modes (Quick, Endless, Real time, Cinematic) marks that
 are due wait in a small pool, and the painter takes the next one as the hand
@@ -88,20 +91,28 @@ Seed, the brush and drops overlay, *Drops and splashes* and the reference
 view are under *More options*. Drops and splashes are off by default: the
 brush paints those marks instead (the splash code is kept).
 
-**Endless refinement:** after the painting, the picture is divided into a
-4×4 grid of areas scored by plain colour difference against the image (as
-the eye sees it, at fine and coarse scales). Each round goes to the area that
-looks least like it, judged on a fresh score taken after the last round.
-The painter never stays on one area: not the same one twice in a row,
-recent visits lower an area's priority, and an area that three visits in a
-row barely improved is set aside for a while. An area whose last two visits
-found nothing to do is finished, and when all are, it stops and says so.
+**Endless refinement:** after the painting, rounds of corrections, each
+on a fresh score taken after the last one. A round does not pick an area
+first (a grid's cell averages a small, glaring problem away with the good
+paper around it): it diagnoses the whole sheet, weighs the best fix for
+each of the worst problems, and makes the fixes that gain the most for
+their time, wherever they are, until its minute of hand time is used. A
+cell's gain counts far more where the painting visibly looks wrong around it
+(the evaluator's error map, smoothed a little), so a glaring patch beats
+polishing what is nearly right; a problem patch wider than a tenth of the
+sheet comes in tile-sized pieces, so no fix sweeps half the sheet. Each
+round also measures what the last one's fixes really did against what they
+promised: a tool that keeps delivering less on this painting is trusted
+less (on the samples, glazes deliver a quarter to a half of what the
+prediction promises, lifts about all of it), and a spot a fix did nothing
+for counts less. When round after round finds nothing worth doing, it stops
+and says so.
 The live similarity score is shown throughout.
 
-Each round first **diagnoses** the area cell by cell, comparing the paint
+Each round first **diagnoses** the sheet cell by cell, comparing the paint
 as it is with the image: too light, too dark, the wrong hue, an edge the
 painting lost (too soft), or variation it lacks (too flat). Then, for each
-problem patch, worst first, it **tries every tool** that could fix it in a
+problem patch it **tries every tool** that could fix it in a
 prediction of what the paint would look like afterwards: strokes of the
 colour the patch needs (a dot for a speck), a glaze (one thin wet wash
 over the patch in one colour), wet-in-wet (clear water, then its colours

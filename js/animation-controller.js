@@ -20,6 +20,13 @@ const BASE_DT = 1 / 30; // painting seconds per simulation step
 const DRY_FAST = 10;
 // Open-ended modes: the longest pause between two planned gestures.
 const MAX_IDLE = 1.5;
+// Endless: how many rounds in a row may find nothing to do before the
+// painting is finished.
+const EMPTY_RUN = 3;
+// With a similarity goal: how long (real seconds of painting) the score may
+// stay the same, to its first decimal, before that counts as the goal: the
+// painting has gone as far as it will.
+const PLATEAU_SECS = 30 * 60;
 
 export class AnimationController {
 	constructor( { renderer, adaptive, evaluate, planLayer, onStats, onDone } ) {
@@ -79,8 +86,14 @@ export class AnimationController {
 		this.round = 0;
 		this.converged = false;
 		this.reachedTarget = false;
-		this.areas = null;
-		this.lastArea = null;
+		this.emptyRun = 0;
+		this.offSheet = null;
+		// Real seconds painted, and since when the score has stood where it
+		// is (to its first decimal).
+		this.paintedReal = 0;
+		this.plateau = null;
+		this.plateaued = false;
+		this.plateauSecs = PLATEAU_SECS;
 		this.waitEval = null;
 		this.evalCount = this.evalCount || 0;
 		this.epoch = ( this.epoch || 0 ) + 1;
@@ -165,87 +178,33 @@ export class AnimationController {
 	}
 
 	/**
-	 * Endless: the next area (of a 4x4 grid) to refine, or null when all are
-	 * finished. Worst first by mean error in the latest evaluation, but the
-	 * painter never stays on one area: not the same one twice in a row,
-	 * recent visits lower an area's priority, and an area that three visits
-	 * in a row barely improved is set aside for a while.
+	 * Cells a refinement round leaves alone: the border Cinematic leaves
+	 * unpainted on purpose (null when there is none).
 	 */
-	_worstArea() {
-		const G = 4;
-		const { W, H } = this.model;
-		const f = this.errorField;
-		if ( ! this.areas ) {
-			this.areas = [];
-			for ( let row = 0; row < G; row++ ) {
-				for ( let col = 0; col < G; col++ ) {
-					this.areas.push( {
-						col,
-						row,
-						visits: 0,
-						empty: 0,
-						done: false,
-						region: { x0: Math.floor( ( col * W ) / G ), x1: Math.floor( ( ( col + 1 ) * W ) / G ) - 1, y0: Math.floor( ( row * H ) / G ), y1: Math.floor( ( ( row + 1 ) * H ) / G ) - 1 },
-					} );
+	_offSheet() {
+		const border = this.splash?.border;
+		if ( ! border ) {
+			return null;
+		}
+		if ( ! this.offSheet ) {
+			const { W, H } = this.model;
+			this.offSheet = new Uint8Array( W * H );
+			for ( let y = 0; y < H; y++ ) {
+				for ( let x = 0; x < W; x++ ) {
+					this.offSheet[ y * W + x ] = border.room( x, y ) < 0 ? 1 : 0;
 				}
 			}
 		}
-		let best = null;
-		let bestErr = -1;
-		const meanErr = ( a ) => {
-			const bx0 = Math.floor( ( a.col * f.EW ) / G );
-			const bx1 = Math.max( bx0 + 1, Math.floor( ( ( a.col + 1 ) * f.EW ) / G ) );
-			const by0 = Math.floor( ( a.row * f.EH ) / G );
-			const by1 = Math.max( by0 + 1, Math.floor( ( ( a.row + 1 ) * f.EH ) / G ) );
-			let sum = 0;
-			let n = 0;
-			for ( let by = by0; by < by1; by++ ) {
-				for ( let bx = bx0; bx < bx1; bx++ ) {
-					sum += ( f.de || f.err )[ by * f.EW + bx ];
-					n++;
-				}
-			}
-			return n ? sum / n : 0;
-		};
-		// How the last visited area did: barely better three times running
-		// sets it aside for a while.
-		const last = this.lastArea;
-		if ( last && undefined !== last.errBefore ) {
-			const now = meanErr( last );
-			last.stalls = now > last.errBefore * 0.98 ? ( last.stalls || 0 ) + 1 : 0;
-			if ( now > last.errBefore * 1.02 ) {
-				// The visit made it worse: leave it alone for a good while.
-				last.restUntil = this.round + 10;
-				last.stalls = 0;
-			} else if ( last.stalls >= 3 ) {
-				last.restUntil = this.round + 6;
-				last.stalls = 0;
-			}
-		}
-		const open = this.areas.filter( ( a ) => ! a.done );
-		const rested = open.filter( ( a ) => ! ( a.restUntil > this.round ) && a !== last );
-		// If everything else is resting, the last area may go again.
-		const pool = rested.length ? rested : open.filter( ( a ) => a !== last ).length ? open.filter( ( a ) => a !== last ) : open;
-		for ( const a of pool ) {
-			const recent = this.round - ( a.lastRound ?? -99 );
-			const fatigue = 1 + 1.5 * Math.exp( -recent / 3 );
-			const e = meanErr( a ) / fatigue;
-			if ( e > bestErr ) {
-				bestErr = e;
-				best = a;
-			}
-		}
-		if ( best ) {
-			best.errBefore = meanErr( best );
-			best.lastRound = this.round;
-			this.lastArea = best;
-		}
-		return best;
+		return this.offSheet;
 	}
 
 	/** What the header says when a layered painting is done. */
 	_doneLabel() {
 		const sim = this.lastScores ? this.lastScores.similarity.toFixed( 1 ) : '—';
+		if ( this.plateaued ) {
+			const held = this.plateauSecs >= 60 ? `${ Math.round( this.plateauSecs / 60 ) } minutes` : `${ this.plateauSecs } seconds`;
+			return `Finished: ${ sim }% similar, unchanged for ${ held }, so taken as the target (${ this.targetSim }%)`;
+		}
 		if ( this.reachedTarget ) {
 			return `Finished: ${ sim }% similar, target ${ this.targetSim }% reached`;
 		}
@@ -260,6 +219,10 @@ export class AnimationController {
 		this.evalPending = false;
 		this.evalCount = ( this.evalCount || 0 ) + 1;
 		this.lastScores = res.scores;
+		const shown = res.scores.similarity.toFixed( 1 );
+		if ( ! this.plateau || this.plateau.sim !== shown ) {
+			this.plateau = { sim: shown, since: this.paintedReal };
+		}
 		const { err, signed, EW, EH } = res;
 		// Damp regions that are still wet: wait for them to settle first.
 		const model = this.model;
@@ -538,11 +501,11 @@ export class AnimationController {
 		if ( ! due || this.deferred.length || this.ready.length || ! handFree ) {
 			return;
 		}
-		// Endless: after the layers, refinement rounds go to the area of the
-		// picture that looks least like the image, judged on a fresh score
-		// taken after the last round, alternating a details pass (lift what is
-		// too dark, dab what is missing) with a fill pass (bare or pale).
-		let area = null;
+		// Endless: after the layers, refinement rounds over the whole picture,
+		// each on a fresh score taken after the last one: the planner finds
+		// every problem, weighs a fix for each, and makes the ones that gain
+		// the most for their time (see refineArea). Mostly against the finish
+		// layer's target, every third round the details layer's.
 		if ( refine ) {
 			if ( null === this.waitEval ) {
 				this.waitEval = this.evalCount + ( this.evalPending ? 1 : 0 );
@@ -558,21 +521,22 @@ export class AnimationController {
 				this.converged = true;
 				return;
 			}
-			area = this._worstArea();
-			if ( ! area ) {
+			// ...and so does a score that has not moved (to its first decimal)
+			// for half an hour: as far as the painting will go.
+			if ( this.targetSim && this.plateau && this.paintedReal - this.plateau.since >= this.plateauSecs ) {
+				this.reachedTarget = true;
+				this.plateaued = true;
 				this.converged = true;
 				return;
 			}
-			// Mostly the fill pass (gaps, pale or too dark, by the error map);
-			// every third visit the details pass.
-			idx = 2 === area.visits % 3 ? 3 : 4;
+			idx = 2 === this.round % 3 ? 3 : 4;
 		}
 		const L = layers[ idx ];
 		this.layerPending = true;
 		const cur = this.model.snapshotPigment();
 		const epoch = this.epoch = ( this.epoch || 0 ) + 1;
 		// Open-ended modes plan without time limits: they paint everything.
-		this.planLayer( { layer: idx, cur: cur.buffer, handX: this.splash.handX, handY: this.splash.handY, seed: refine ? 100 + this.round : idx, loaded: this.splash.loaded, unlimited: !! this.openEnded || refine, round: area ? area.visits + 1 : 0, region: area ? area.region : null, signed: area ? this.errorField.signed.slice() : null, EW: this.errorField?.EW, EH: this.errorField?.EH }, [ cur.buffer ] ).then( ( res ) => {
+		this.planLayer( { layer: idx, cur: cur.buffer, handX: this.splash.handX, handY: this.splash.handY, seed: refine ? 100 + this.round : idx, loaded: this.splash.loaded, unlimited: !! this.openEnded || refine, round: refine ? Math.min( 4, 1 + Math.floor( this.round / 8 ) ) : 0, fresh: refine && ! this.round, region: refine ? { x0: 0, x1: this.model.W - 1, y0: 0, y1: this.model.H - 1 } : null, off: refine ? this._offSheet() : null, signed: refine ? this.errorField.signed.slice() : null, de: refine ? ( this.errorField.de || this.errorField.err ).slice() : null, EW: this.errorField?.EW, EH: this.errorField?.EH }, [ cur.buffer ] ).then( ( res ) => {
 			if ( epoch !== this.epoch ) {
 				return; // restarted meanwhile
 			}
@@ -606,8 +570,7 @@ export class AnimationController {
 			}
 			if ( refine ) {
 				this.round++;
-				area.visits++;
-				this.layerName = `Refining the weakest area (${ area.col + 1 }, ${ area.row + 1 }), round ${ this.round }`;
+				this.layerName = `Refining, round ${ this.round }`;
 				// What it found and what it chose for it (e.g. "glaze 2, soften 1").
 				const tools = Object.entries( res.tools || {} ).map( ( [ k, n ] ) => `${ k } ${ n }` ).join( ', ' );
 				if ( tools ) {
@@ -616,14 +579,15 @@ export class AnimationController {
 				if ( this.targetSim && this.lastScores ) {
 					this.layerName += ` · ${ this.lastScores.similarity.toFixed( 1 ) }% of ${ this.targetSim }%`;
 				}
-				// An area visited enough whose last two visits found nothing to
-				// do is finished; when all are, the painting has converged.
-				area.empty = res.ops.length ? 0 : area.empty + 1;
-				if ( area.empty >= 2 && area.visits >= 4 ) {
-					area.done = true;
-				}
-				if ( this.areas.every( ( a ) => a.done ) ) {
-					this.converged = true;
+				// When round after round finds nothing worth doing, the painting
+				// is done.
+				if ( res.ops.length ) {
+					this.emptyRun = 0;
+				} else {
+					this.emptyRun++;
+					if ( this.emptyRun >= EMPTY_RUN ) {
+						this.converged = true;
+					}
 				}
 				this.layerPending = false;
 				this.layerOps = ( this.layerOps || 0 ) + res.ops.length;
@@ -723,6 +687,7 @@ export class AnimationController {
 		const frameStart = performance.now();
 		if ( painting ) {
 			const dtReal = Math.min( dtMs, 100 ) / 1000;
+			this.paintedReal += dtReal;
 			// Nothing in the painter's hands and nothing being planned, only
 			// strokes waiting for wet paint (or the final drying): in Real time
 			// that wait is fast-forwarded.
@@ -749,6 +714,11 @@ export class AnimationController {
 			this._maybeEvaluate( now );
 			if ( this.finishing && 0 === this.model.activeTiles ) {
 				this.state = 'done';
+				// A goal met (either way): Cinematic's camera steps back to the
+				// whole painting.
+				if ( this.reachedTarget && this.director?.active ) {
+					this.director.showWhole();
+				}
 				this.onDone?.();
 			}
 		}
