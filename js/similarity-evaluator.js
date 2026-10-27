@@ -197,7 +197,8 @@ export class SimilarityEvaluator {
 	 * Leaves a margin round the sheet out of the scores (a share of its long
 	 * side on every side): Cinematic's clean border is left unpainted on
 	 * purpose and is no part of the likeness. 0 scores the whole sheet. The
-	 * error maps still cover the whole sheet.
+	 * error maps still cover the whole sheet; `evaluate` reports the margin
+	 * (cells) so the painter can leave alone what the scores leave out.
 	 */
 	setMargin( share ) {
 		this.margin = Math.max( 0, Math.min( 0.2, share || 0 ) );
@@ -289,7 +290,7 @@ export class SimilarityEvaluator {
 		}
 		scores.similarity = combineScore( scores );
 		scores.ms = performance.now() - t0;
-		return { err, de, signed, errU8, EW, EH, scores };
+		return { err, de, signed, errU8, EW, EH, scores, margin: this.inner ? this.inner.m : 0 };
 	}
 
 	/**

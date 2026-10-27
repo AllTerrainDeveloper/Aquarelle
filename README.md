@@ -63,9 +63,10 @@ tabs, then press **Paint** (it also pauses and resumes):
   back from the palette before it has loaded.
   Like a careful painter, the brush lifts short of the sheet's edges,
   leaving a clean border whose width wanders along each edge and from
-  stroke to stroke (refinement leaves it alone too, and the similarity
-  score leaves it out: only the sheet inside the border's widest reach is
-  compared with the image). *High resolution*
+  stroke to stroke. The similarity score leaves it out: only the sheet
+  inside the border's widest reach is compared with the image, and
+  refinement keeps to that same area, rather than chasing the band where
+  each stroke lifts a little nearer or farther from the edge. *High resolution*
   paints on a grid twice as fine (up to 960 cells on the long side), so
   paint stays crisp when the camera moves in close; it needs a faster
   computer.

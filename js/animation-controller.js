@@ -177,21 +177,29 @@ export class AnimationController {
 		return this.speed;
 	}
 
+	/** Is (x, y) in the margin the similarity scores leave out? */
+	_inMargin( x, y ) {
+		const m = this.scoreMargin;
+		return m > 0 && ( x < m || y < m || x >= this.model.W - m || y >= this.model.H - m );
+	}
+
 	/**
-	 * Cells a refinement round leaves alone: the border Cinematic leaves
-	 * unpainted on purpose (null when there is none).
+	 * Cells a refinement round leaves alone: the margin the scores leave out
+	 * (null when there is none). It holds Cinematic's border and the band
+	 * just inside it, where each stroke lifts a little nearer or farther
+	 * from the edge: paint there lands by chance and counts for nothing.
 	 */
 	_offSheet() {
-		const border = this.splash?.border;
-		if ( ! border ) {
+		if ( ! this.scoreMargin ) {
 			return null;
 		}
-		if ( ! this.offSheet ) {
+		if ( this.offSheet?.m !== this.scoreMargin ) {
 			const { W, H } = this.model;
 			this.offSheet = new Uint8Array( W * H );
+			this.offSheet.m = this.scoreMargin;
 			for ( let y = 0; y < H; y++ ) {
 				for ( let x = 0; x < W; x++ ) {
-					this.offSheet[ y * W + x ] = border.room( x, y ) < 0 ? 1 : 0;
+					this.offSheet[ y * W + x ] = this._inMargin( x, y ) ? 1 : 0;
 				}
 			}
 		}
@@ -223,7 +231,8 @@ export class AnimationController {
 		if ( ! this.plateau || this.plateau.sim !== shown ) {
 			this.plateau = { sim: shown, since: this.paintedReal };
 		}
-		const { err, signed, EW, EH } = res;
+		const { err, de, signed, EW, EH } = res;
+		this.scoreMargin = res.margin || 0;
 		// Damp regions that are still wet: wait for them to settle first.
 		const model = this.model;
 		const W = model.W;
@@ -239,12 +248,14 @@ export class AnimationController {
 				// a border that is slightly off reads better than one reworked.
 				const edgeCalm = 1 - 0.75 * this.an.edge[ i ];
 				// Ignore errors that are already within a perceptual tolerance, and
-				// the border Cinematic leaves unpainted on purpose.
-				const border = this.splash?.border && this.splash.border.room( bx * 2, by * 2 ) < 0;
-				if ( border && signed ) {
+				// the margin the scores leave out (Cinematic's border): its paper
+				// is bare on purpose, so its error would only draw the brush there.
+				const margin = this._inMargin( bx * 2, by * 2 );
+				if ( margin ) {
 					signed[ b ] = 0;
+					de[ b ] = 0;
 				}
-				const e = border ? 0 : Math.max( 0, err[ b ] - 3.5 );
+				const e = margin ? 0 : Math.max( 0, err[ b ] - 3.5 );
 				weight[ b ] = e * e * wetPenalty * edgeCalm;
 				acc += weight[ b ];
 				cdf[ b ] = acc;
