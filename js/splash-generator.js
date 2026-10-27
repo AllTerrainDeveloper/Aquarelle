@@ -516,6 +516,38 @@ export class SplashGenerator {
 	 * A drop falls, lands and blooms outward; heavier drops throw a crown of
 	 * satellite droplets (particles) that bloom where they land.
 	 */
+	/**
+	 * A line lifted with a clean, thirsty brush: drawn along the path at the
+	 * pace of a fine stroke; the paint comes off as the brush leaves.
+	 */
+	_liftAlong( rng, op, lift ) {
+		const anim = this.animator;
+		const P = op.path;
+		const n = P.length / 3;
+		let total = 0;
+		const track = new Float32Array( n * 3 );
+		for ( let q = 0; q < n; q++ ) {
+			if ( q ) {
+				total += Math.hypot( P[ q * 3 ] - P[ q * 3 - 3 ], P[ q * 3 + 1 ] - P[ q * 3 - 2 ] );
+			}
+			track[ q * 3 ] = P[ q * 3 ];
+			track[ q * 3 + 1 ] = P[ q * 3 + 1 ];
+			track[ q * 3 + 2 ] = total;
+		}
+		for ( let q = 0; q < n; q++ ) {
+			track[ q * 3 + 2 ] = total > 0 ? track[ q * 3 + 2 ] / total : q / Math.max( 1, n - 1 );
+		}
+		const B = this.an.B;
+		const approach = anim.cinematic ? CINE_APPROACH : 0.12;
+		const start = anim.nextBrush( this.now, approach, -1, P[ 0 ], P[ 1 ] );
+		const dur = Math.min( 2.6, 0.25 + total / ( B * 0.3 ) );
+		anim.brushFreeAt = start + dur + approach;
+		anim.add( { tool: 'brush', mode: 'sweep', start, dur, approach, linger: approach, x: P[ 0 ], y: P[ 1 ], tip: Math.max( 0.8, op.r ?? 1 ), track, color: '#c9c0ae', lift } );
+		this.handX = P[ ( n - 1 ) * 3 ];
+		this.handY = P[ ( n - 1 ) * 3 + 1 ];
+		return true;
+	}
+
 	_drop( rng, op, x, y, r, k, { crown = 0, spray = 0, extra = {}, delay = 0, color, fit = Infinity } = {} ) {
 		if ( this.noSplashes ) {
 			// Drops and splashes off: the brush paints the same mark, a short
@@ -795,12 +827,17 @@ export class SplashGenerator {
 			case 'lift': {
 				// A clean damp brush blots the spot; pigment comes off as it finishes.
 				// `wet`: how damp the brush is (1 = usual; Endless lifts barely damp).
-				const lift = { x, y, r, strength: op.strength ?? 0.5, wet: op.wet ?? 1, seed: rng.u32() };
+				// With a `path` (x, y, r per point) it is drawn along a line instead
+				// (a thirsty brush lifting a strand or a highlight out of dark paint).
+				const lift = { x, y, r, path: op.path, strength: op.strength ?? 0.5, wet: op.wet ?? 1, seed: rng.u32() };
 				if ( ! this.animator ) {
 					model.lift( lift );
 					return true;
 				}
 				const anim = this.animator;
+				if ( op.path ) {
+					return this._liftAlong( rng, op, lift );
+				}
 				// A tiny spot is a quick dab; a big blot takes its time.
 				const u = Math.min( 1, r / ( this.an.B * 0.02 ) );
 				// Cinematic: the brush is seen coming down onto the paper and lifting off.

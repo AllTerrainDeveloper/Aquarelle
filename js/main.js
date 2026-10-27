@@ -104,16 +104,21 @@ const fmt = ( s ) => {
 const setStatus = ( t ) => ( $( 'status' ).textContent = t );
 const srcSize = ( s ) => [ s.naturalWidth || s.width, s.naturalHeight || s.height ];
 
+// How much a photograph is simplified into painterly shapes at Balanced (1:
+// as much as at Soft); finer Detail simplifies less, Maximum not at all.
+const SIMPLIFY_BALANCED = 0.6;
+
 /**
  * Fine-detail levels: grid resolution, how many detail strokes the hand
- * makes, and how small they get. Higher levels keep text and logos legible.
+ * makes, how small they get, and how much a photograph is simplified.
+ * Higher levels keep text and logos legible.
  */
 const DETAIL = [
-	{ name: 'Soft', res: 300, strokes: 0.6, fine: 1.25 },
-	{ name: 'Balanced', res: 400, strokes: 1, fine: 1 },
-	{ name: 'Fine', res: 520, strokes: 1.7, fine: 0.75 },
-	{ name: 'Very fine', res: 640, strokes: 2.4, fine: 0.6 },
-	{ name: 'Maximum', res: 800, strokes: 3.2, fine: 0.5 },
+	{ name: 'Soft', res: 300, strokes: 0.6, fine: 1.25, simplify: 1 },
+	{ name: 'Balanced', res: 400, strokes: 1, fine: 1, simplify: SIMPLIFY_BALANCED },
+	{ name: 'Fine', res: 520, strokes: 1.7, fine: 0.75, simplify: 0.35 },
+	{ name: 'Very fine', res: 640, strokes: 2.4, fine: 0.6, simplify: 0.15 },
+	{ name: 'Maximum', res: 800, strokes: 3.2, fine: 0.5, simplify: 0 },
 ];
 const detailLevel = () => DETAIL[ Number( $( 'detail' ).value ) ] || DETAIL[ 1 ];
 
@@ -315,7 +320,7 @@ async function analyze() {
 	const t0 = performance.now();
 	let r;
 	try {
-		r = await call( 'analyze', { width: W, height: H, pixels: pixels.buffer, refW, refH, refPixels: refPixels.buffer, K, seed, duration, exclude: [ ...excluded ], remap: [ ...remap ], style: $( 'style' ).value, detail: { strokes: detailLevel().strokes, fine: detailLevel().fine } }, [
+		r = await call( 'analyze', { width: W, height: H, pixels: pixels.buffer, refW, refH, refPixels: refPixels.buffer, K, seed, duration, exclude: [ ...excluded ], remap: [ ...remap ], style: $( 'style' ).value, detail: { strokes: detailLevel().strokes, fine: detailLevel().fine }, simplify: detailLevel().simplify }, [
 			pixels.buffer,
 			refPixels.buffer,
 		] );
@@ -504,7 +509,7 @@ function setPlayLabel() {
 
 /* Painting modes (tabs) ------------------------------------------------------------- */
 const MODE_HINTS = {
-	quick: 'The whole painting, time-lapsed: about 20 seconds, longer if it needs it to finish everything.',
+	quick: 'The whole painting, time-lapsed, then refined while that still improves it: usually one to a few minutes.',
 	endless: 'Paints, then keeps refining the areas that look least like the image, until nothing is left to improve.',
 	realtime: "At the painter's own pace, with every animation. Paints everything; waits for drying are fast-forwarded.",
 	custom: 'Fits the painting into the time you choose, at the playback speed you choose.',
@@ -845,7 +850,7 @@ function renderBench( rows ) {
 }
 
 $( 'bench' ).addEventListener( 'click', runBench );
-window.__app = { runBench, animation, adaptive, get session() { return session; }, loadSample: ( n ) => loadSource( makeSample( n ), n ), setSpeed: ( s ) => animation.setSpeed( s ) };
+window.__app = { runBench, animation, adaptive, score: finalEvaluation, get session() { return session; }, loadSample: ( n ) => loadSource( makeSample( n ), n ), setSpeed: ( s ) => animation.setSpeed( s ) };
 
 layout();
 if ( params.get( 'bench' ) ) {

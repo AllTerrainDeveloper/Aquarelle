@@ -354,6 +354,12 @@ export class GestureAnimator {
 		return this.actions.length > 0;
 	}
 
+	/** Is a gesture still to start or still painting (not just the hand moving off)? */
+	get working() {
+		const t = this.clock;
+		return this.actions.some( ( a ) => ! a.hidden && t < a.start + a.dur );
+	}
+
 	/**
 	 * @param {Object} a { blob?, lift?, start, dur, mode: 'radial'|'sweep'|'none',
 	 *   tool: 'drop'|'brush'|'particle'|'sponge', linger, ... }

@@ -20,7 +20,14 @@ tabs, then press **Paint** (it also pauses and resumes):
 
 - **Quick**: the whole painting time-lapsed (its planned duration plays in
   about 20 seconds) with no time limits: nothing is trimmed, it runs until
-  every drop, splash and stroke is painted.
+  every drop, splash and stroke is painted; with the refining below,
+  usually one to a few minutes in all. It plays up to 8× faster than
+  that while the device has time to spare in its frames (the simulation,
+  the hand and the marks all together, so the painting is the same), and
+  time with nothing to do (the next mark not due yet, the sheet drying at
+  the end) goes by up to 10× faster still. After the layers it refines,
+  as Endless does, for as long as that pays off: once a dozen rounds in a
+  row have not raised the score by a tenth of a point, it stops.
 - **Endless**: paints, then keeps refining (see below); its *Pace* is Quick
   or Real time.
 - **Real time**: the painter's own pace, 1× with every animation; no time
@@ -86,7 +93,9 @@ In the open-ended modes (Quick, Endless, Real time, Cinematic) marks that
 are due wait in a small pool, and the painter takes the next one as the hand
 frees up: in the colour on the brush and nearest to the last stroke, among
 the marks planned for the next moment. The brush works its way across the
-sheet instead of hopping to wherever the next mark happens to be due.
+sheet instead of hopping to wherever the next mark happens to be due. Only
+marks actually painted count against a frame's limit, so a long run of due
+marks never keeps the pool from painting.
 
 Seed, the brush and drops overlay, *Drops and splashes* and the reference
 view are under *More options*. Drops and splashes are off by default: the
@@ -118,6 +127,13 @@ prediction of what the paint would look like afterwards: strokes of the
 colour the patch needs (a dot for a speck), a glaze (one thin wet wash
 over the patch in one colour), wet-in-wet (clear water, then its colours
 charged in to blend softly), a fine re-cut along a lost edge, and lifts.
+A thin patch that is too dark (a strand in the hair, a highlight along a
+branch) can also be **lifted as a line**: a clean, thirsty brush drawn
+along its spine, rather than a row of blots. Each round looks for smaller
+differences than the last (the thresholds are divided by a strictness that
+grows every eight rounds), so refining keeps finding work until the
+painting is close, instead of stopping once nothing is off by a
+just-noticeable difference.
 The tool that brings the patch closest to the image for its time is used,
 if any helps (water's effect is the least certain, so a wet tool must
 promise more), and the prediction is updated before the next patch. The
@@ -125,8 +141,13 @@ round's label says what it chose, for example "glaze 24, lift 16,
 stroke 3". Clear water to soften an edge that is too hard was tried as
 well; measured on paintings it did worse than leaving the edge (water on
 dried paint mostly makes backruns), so too-hard edges are left alone.
-Corrections other than glazes and wet-in-wet are made almost dry, so they
-stay where they are put.
+Corrections other than glazes and wet-in-wet are made with a nearly dry
+brush (water at most 0.06), so they stay where they are put, without a bloom
+or rim of their own. (A stroke's texture follows the brush: bristle streaks
+in a broad brush's wash, not in a fine tip's line, and mottling as a wet
+wash's water pools, not under a nearly dry brush.) Strokes stop at a cell's
+target darkness, never past it: watercolour cannot be taken back, so the
+paint builds up to the value and refining adds what is missing.
 
 **Clear water:** like a watercolourist, the painter also works with a
 clean brush. Big soft zones (a sky, a background) are wetted first so their
@@ -170,7 +191,8 @@ the ratio they need (and Cinematic's brush shows the mix). Laid one after
 the other, the first would take the cell's darkness and the second could
 not follow, a dark brown left red. Detection uses the share of pixels with fine,
 non-edge texture (photos ≈0.25–0.3, flat artwork < 0.08). A higher Detail
-setting keeps finer shapes: the photo filters span a fixed share of the
+setting keeps finer shapes, and simplifies a photo less (Soft as much as
+it can, Balanced a little over half of that, Maximum not at all): the photo filters span a fixed share of the
 picture, sampled sparsely so analysis stays fast (≈0.7 s at Balanced,
 ≈2.5 s at Maximum).
 
@@ -204,10 +226,12 @@ for that moment of stepping back.
    *The palette* above), decomposes every pixel into pigment amounts
    (Beer–Lambert, non-negative least squares over pigment pairs), and finds the big areas,
    real edges, and what to mask: thin whites (lettering, highlights) for
-   good, and small shapes clearly lighter than the area around them
-   (flowers in the grass, lit windows, a catchlight) until the details,
-   when the mask is rubbed off and they are painted on clean paper (a light
-   colour laid over the grass's green would stay green).
+   good, and small shapes clearly lighter than a solid darker area around
+   them (light strands in dark hair, lit windows, flowers in the grass, a
+   catchlight) until the details, when the mask is rubbed off and they are
+   painted on clean paper (a light colour laid over the hair's brown would
+   stay dark). Where the dark is the thin part (branches against the sky),
+   nothing is masked: the light goes on first and the dark over it.
 1. **First wash: light and loose.** Every big area, biggest first, gets its
    lightest version: big drops poured in (sized to fit), spread with a broad
    wet brush, its other colours dropped in while wet, plus a few splashes.
@@ -301,11 +325,14 @@ granulation and backruns all emerge from it.
 - **GPU (WebGL2):** only the changed tiles of that field are uploaded each
   frame (one rectangle per row of tiles), as full floats into a staging
   texture that the GPU copies into the half-float texture the shader
-  reads (the browser would otherwise convert every value). A single fragment shader upsamples it and composes the look:
+  reads (the browser would otherwise convert every value). A single fragment shader upsamples it (Catmull-Rom between cells,
+  so a cell keeps its own value at its centre and fine detail stays crisp) and composes the look:
   Beer–Lambert glazing over a cold-press sheet (tooth lit from the upper
   left, fibres, uneven sizing; subtractive mixing: yellow over blue reads
   green), domain-warped edges (crisp, organic borders far
-  above grid resolution), granulation in paper valleys, pigment mottling,
+  above grid resolution), granulation in paper valleys (in light and mid
+  washes; a heavy dark fills the valleys and the peaks alike, so past a
+  density of 0.5 its speckle stops growing with the paint), pigment mottling,
   pooling where a wash ends (a step that is large for the paint there, not
   the grain within a dark wash, so the painting keeps the value the
   simulation laid), paper relief lighting, and a wet sheen.
@@ -359,8 +386,11 @@ reference.
 
 - Simulation time is the master clock. The wall clock × speed sets a
   target. The frame interleaves due ops and fixed 1/30 s steps until it
-  reaches the target or exhausts its budget (7 ms at level 0, plus 3 ms
-  for gesture deposits). Rendering happens every frame regardless.
+  reaches the target or exhausts its budget (at level 0, whatever the rest
+  of the frame leaves less a 4 ms margin, 7–11 ms; lower levels a fixed
+  3.5–6 ms; plus 3 ms for gesture deposits). Rendering happens every frame
+  regardless. Steps only get coarser when even the planned pace cannot keep
+  up.
 - Duration is a slider (1–30 minutes; default 10). The planner lays every
   stage out over the chosen duration and sizes brushwork to it.
 - Drying is natural everywhere. It is accelerated only locally, when the

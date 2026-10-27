@@ -156,6 +156,50 @@ export function depthInside( mask, W, H, cap = Infinity ) {
 }
 
 /**
+ * packDiscs over one patch (`cells`, sheet indices), worked out on its
+ * bounding box (plus a margin) instead of the whole sheet: the same discs,
+ * in sheet coordinates, for a fraction of the work. Nothing outside the
+ * patch is covered beforehand.
+ */
+export function packDiscsIn( cells, W, H, cap, opts ) {
+	let x0 = W;
+	let y0 = H;
+	let x1 = -1;
+	let y1 = -1;
+	for ( const i of cells ) {
+		const x = i % W;
+		const y = ( i / W ) | 0;
+		x0 = Math.min( x0, x );
+		x1 = Math.max( x1, x );
+		y0 = Math.min( y0, y );
+		y1 = Math.max( y1, y );
+	}
+	if ( x1 < 0 ) {
+		return [];
+	}
+	// A disc's centre moves off its cell by under its depth: a few cells of
+	// margin keep it from the box's edge (the sheet's edge stays where it is).
+	const m = 3;
+	const bx = Math.max( 0, x0 - m );
+	const by = Math.max( 0, y0 - m );
+	const bw = Math.min( W - 1, x1 + m ) - bx + 1;
+	const bh = Math.min( H - 1, y1 + m ) - by + 1;
+	const mask = new Uint8Array( bw * bh );
+	for ( const i of cells ) {
+		mask[ ( ( ( i / W ) | 0 ) - by ) * bw + ( i % W ) - bx ] = 1;
+	}
+	// The sheet's edge is not a border: where the box stops short of it, it
+	// must not become one either.
+	const depth = depthInside( mask, bw, bh, cap );
+	const discs = packDiscs( mask, depth, new Uint8Array( bw * bh ), { ...opts, W: bw, H: bh } );
+	for ( const d of discs ) {
+		d.x += bx;
+		d.y += by;
+	}
+	return discs;
+}
+
+/**
  * Largest-first packing: the deepest uncovered cell gets the biggest gesture
  * whose footprint fits (plus a seam so neighbouring washes meet).
  */

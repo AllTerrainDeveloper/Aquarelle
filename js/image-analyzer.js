@@ -33,12 +33,18 @@ const OVER_MASSTONE = 1.15;
 const MASSTONE_MAX = 3;
 // The strengths at which a paint is compared: a quarter, half and full.
 const TINTS = [ 0.25, 0.5, 1 ];
-// Masking fluid for a small light shape: no darker than this (mean optical
-// density), and lighter than the area around it by this much, and by this
-// share of the area's darkness.
-const MASK_LIGHT = 0.6;
-const MASK_STEP = 0.15;
-const MASK_SHARE = 0.45;
+// A photograph's simplification: passes of edge-preserving smoothing, and how
+// alike (OKLab) two colours must be to be smoothed together.
+const SIMPLIFY_PASSES = 4;
+const SIMPLIFY_RANGE = 0.05;
+// Masking fluid for a small shape at least this much lighter (OKLab L) than
+// the area around it, where that area makes up this share of what is
+// around the shape.
+const MASK_STEP = 0.05;
+const MASK_SOLID = 0.7;
+// ...and only a shape that is itself light (OKLab L): a dark grey speck in a
+// black area is painted with less paint, not masked.
+const MASK_MIN_L = 0.4;
 
 /* ------------------------------------------------------------------ */
 /* Filters                                                              */
@@ -396,18 +402,24 @@ function sparseKernel( r, step ) {
 /**
  * Simplifies a photograph into the shapes a painter would see: repeated
  * edge-preserving (bilateral) smoothing in OKLab flattens texture and noise
- * inside areas while keeping the edges between them. Updates lab and lin.
+ * inside areas while keeping the edges between them. `amount` (0–1, from
+ * the Detail setting): how much; a painter asked for more detail
+ * simplifies less. Updates lab and lin.
  */
-function simplifyPhoto( lab, lin, W, H, B ) {
+function simplifyPhoto( lab, lin, W, H, B, amount = 1 ) {
 	const N = W * H;
+	const passes = Math.round( SIMPLIFY_PASSES * amount );
+	if ( ! passes ) {
+		return;
+	}
 	// The texture to flatten has a size relative to the picture: the filter
 	// spans ~B/140 cells, sampled sparsely so its cost per cell is the same
 	// at every Detail setting.
 	const spatial = sparseKernel( 3, Math.max( 1, Math.round( B / 400 ) ) );
-	const sr = 2 * 0.05 ** 2;
+	const sr = 2 * ( SIMPLIFY_RANGE * Math.sqrt( amount ) ) ** 2;
 	let src = lab;
 	let dst = new Float32Array( N * 3 );
-	for ( let iter = 0; iter < 4; iter++ ) {
+	for ( let iter = 0; iter < passes; iter++ ) {
 		for ( let y = 0; y < H; y++ ) {
 			for ( let x = 0; x < W; x++ ) {
 				const i = ( y * W + x ) * 3;
@@ -816,7 +828,7 @@ export function pixelsToLabLinear( pixels, n ) {
 	return { lin, lab };
 }
 
-export function analyzeImage( { width: W, height: H, pixels, K: K0, seed, exclude = [], remap = [], style = 'auto' } ) {
+export function analyzeImage( { width: W, height: H, pixels, K: K0, seed, exclude = [], remap = [], style = 'auto', simplify = 1 } ) {
 	const times = {};
 	let t = performance.now();
 	const mark = ( name ) => {
@@ -834,7 +846,7 @@ export function analyzeImage( { width: W, height: H, pixels, K: K0, seed, exclud
 	const texture = textureScore( lab, W, H );
 	const photo = 'photo' === style || ( 'auto' === style && texture > 0.12 );
 	if ( photo ) {
-		simplifyPhoto( lab, lin, W, H, B );
+		simplifyPhoto( lab, lin, W, H, B, simplify );
 	}
 	const L = channel( lab, 0, N );
 	mark( 'normalize' );
@@ -1112,7 +1124,10 @@ export function analyzeImage( { width: W, height: H, pixels, K: K0, seed, exclud
 	}
 	if ( photo ) {
 		// A photo's mixes flip from pixel to pixel; let each colour form areas.
-		smoothInShapes( T0, lab, W, H, 4, Math.max( 1, Math.round( B / 400 ) ), 0.08, 2 );
+		const passes = Math.round( 2 * simplify );
+		if ( passes ) {
+			smoothInShapes( T0, lab, W, H, 4, Math.max( 1, Math.round( B / 400 ) ), 0.08, passes );
+		}
 	}
 	mark( 'decomposition' );
 
@@ -1347,17 +1362,27 @@ export function analyzeImage( { width: W, height: H, pixels, K: K0, seed, exclud
 	};
 	maskOut( white, 1, N * 0.02 );
 	// Small light shapes in a darker area (flowers in the grass, lit windows,
-	// a catchlight) are masked too, but only until the details: the washes
-	// and glazes go over the mask, then it is rubbed off and they are painted
-	// in their own colour on clean paper. A light colour laid over the
-	// grass's green would stay green. Marked 2. Lighter than the area around
-	// them: than what closing (a max, then a min filter) leaves where they
-	// were, i.e. the area with its small light holes filled.
+	// a catchlight, light strands in dark hair) are masked too, but only
+	// until the details: the washes and glazes go over the mask, then it is
+	// rubbed off and they are painted in their own colour on clean paper. A
+	// light colour laid over the grass's green or the hair's brown would stay
+	// dark. Marked 2. Lighter, as the eye sees it, than the area around them:
+	// than what opening (a min, then a max filter) leaves of the lightness
+	// where they were, i.e. the area with its small light shapes taken out.
+	// Only inside a solid darker area (hair around a strand, a wall around a
+	// window): where the darker paint is the thin part (the branches of a
+	// tree against the sky), the light is washed in first and the dark goes
+	// on top, no mask needed.
 	const closeR = Math.max( 1, Math.round( thinMax ) );
-	const area = minFilter( maxFilter( darkness, W, H, closeR ), W, H, closeR );
+	const area = maxFilter( minFilter( L, W, H, closeR ), W, H, closeR );
+	const ground = new Float32Array( N );
+	for ( let i = 0; i < N; i++ ) {
+		ground[ i ] = L[ i ] - area[ i ] <= MASK_STEP ? 1 : 0;
+	}
+	const solid = boxBlur( ground, W, H, 2 * closeR );
 	const speck = new Uint8Array( N );
 	for ( let i = 0; i < N; i++ ) {
-		speck[ i ] = ! reserve[ i ] && darkness[ i ] < MASK_LIGHT && area[ i ] - darkness[ i ] > Math.max( MASK_STEP, MASK_SHARE * area[ i ] ) ? 1 : 0;
+		speck[ i ] = ! reserve[ i ] && L[ i ] >= MASK_MIN_L && L[ i ] - area[ i ] > MASK_STEP && solid[ i ] >= MASK_SOLID ? 1 : 0;
 	}
 	maskOut( speck, 2, ( B * 0.03 ) ** 2 );
 	mark( 'reserve' );

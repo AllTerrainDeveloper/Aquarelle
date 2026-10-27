@@ -33,6 +33,19 @@ const FRONT = 0.2;
 // least this much of it (against its own pigment), on this share of them.
 const MIX_MIN = 0.15;
 const MIX_SHARE = 0.4;
+// Brush strokes never push a cell past its target darkness (by more than
+// this factor and pad): watercolour cannot be taken back, so paint builds up
+// to the value and no further; what is missing is added later.
+const DENS_OVER = 1.0;
+const DENS_PAD = 0.005;
+// Bristle streaks show in a brush stroke from this tip radius (cells), in
+// full from STREAK_FULL; a finer tip lays an even line.
+const STREAK_TIP = 1.5;
+const STREAK_FULL = 4;
+// A stroke mottles (±8%) as its water pools while drying; a nearly dry brush
+// (water below MOTTLE_WATER) lays its colour evenly, in proportion.
+const MOTTLE = 0.08;
+const MOTTLE_WATER = 0.25;
 
 export class PigmentModel {
 	constructor( { W, H, pigments, T, paper, reserve } ) {
@@ -65,7 +78,7 @@ export class PigmentModel {
 			for ( let k = 0; k < this.K; k++ ) {
 				dsum += T[ 0 ][ k ][ i ] * this.meanA[ k ];
 			}
-			this.targetDens[ i ] = dsum * 1.05 + 0.02;
+			this.targetDens[ i ] = dsum * DENS_OVER + DENS_PAD;
 		}
 		this.h = new Float32Array( N );
 		this.g = [];
@@ -684,6 +697,7 @@ export class PigmentModel {
 			// The brush unloads as it goes: a little lighter toward the end.
 			const load = 1 - ( b.unload ?? 0.2 ) * sj;
 			const dry = b.water < 0.25;
+			const mottle = MOTTLE * Math.min( 1, b.water / MOTTLE_WATER );
 			const xa = Math.max( b.bx0, Math.floor( Math.min( ax, cx ) - ext ) );
 			const xb = Math.min( b.bx0 + b.bw - 1, Math.ceil( Math.max( ax, cx ) + ext ) );
 			const ya = Math.max( b.by0, Math.floor( Math.min( ay, cy ) - ext ) );
@@ -739,10 +753,12 @@ export class PigmentModel {
 						b.shared[ i ] = cover;
 					}
 					// Bristle streaks: a texture that depends only on the position
-					// across the stroke, so it runs along the stroke's direction.
+					// across the stroke, so it runs along the stroke's direction. A
+					// broad brush's: a fine tip lays an even line.
 					const across = ( ( x - qx ) * -uy + ( y - qy ) * ux ) / rr;
 					const bristle = valueNoise( across * 4.5 + 7.3, 0.5, seed ^ 0x2c1b );
-					let streak = 0.82 + 0.36 * bristle;
+					const sa = rr <= STREAK_TIP ? 0 : Math.min( 1, ( rr - STREAK_TIP ) / ( STREAK_FULL - STREAK_TIP ) );
+					let streak = 1 + 0.18 * sa * ( 2 * bristle - 1 );
 					// Near-dry strokes skip on the paper's tooth (dry-brush breaks).
 					if ( dry && rr > 2.5 && bristle < 0.28 && this.paper[ i ] > 0.5 ) {
 						streak *= 0.25;
@@ -750,7 +766,7 @@ export class PigmentModel {
 					if ( gk ) {
 						// Never past the image's darkness at this cell, counting all the
 						// paint already here (drops, other colours, this stroke).
-						total += this._lay( b, i, tone * load * streak * ( 0.92 + 0.16 * n ) * ( cover - had ), mixT );
+						total += this._lay( b, i, tone * load * streak * ( 1 + mottle * ( 2 * n - 1 ) ) * ( cover - had ), mixT );
 					}
 					if ( b.water > 0 ) {
 						const hv = h[ i ] + b.water * ( 0.8 + 0.4 * n ) * ( cover - had );
@@ -776,18 +792,31 @@ export class PigmentModel {
 	/** Sponge lift: removes pigment (correcting regions that went too dark). */
 	lift( b ) {
 		const { W, H } = this;
-		const R = b.r + 2;
-		const x0 = Math.max( 0, Math.floor( b.x - R ) );
-		const x1 = Math.min( W - 1, Math.ceil( b.x + R ) );
-		const y0 = Math.max( 0, Math.floor( b.y - R ) );
-		const y1 = Math.min( H - 1, Math.ceil( b.y + R ) );
+		// A blot (x, y, r), or a line drawn with the damp brush: `path`, points
+		// x, y and the brush's radius there.
+		const P = b.path || [ b.x, b.y, b.r ];
+		let x0 = W;
+		let y0 = H;
+		let x1 = 0;
+		let y1 = 0;
+		for ( let q = 0; q < P.length; q += 3 ) {
+			const R = P[ q + 2 ] + 2;
+			x0 = Math.min( x0, Math.max( 0, Math.floor( P[ q ] - R ) ) );
+			x1 = Math.max( x1, Math.min( W - 1, Math.ceil( P[ q ] + R ) ) );
+			y0 = Math.min( y0, Math.max( 0, Math.floor( P[ q + 1 ] - R ) ) );
+			y1 = Math.max( y1, Math.min( H - 1, Math.ceil( P[ q + 1 ] + R ) ) );
+		}
 		let bits = 0;
 		let removed = 0;
 		for ( let y = y0; y <= y1; y++ ) {
 			for ( let x = x0; x <= x1; x++ ) {
-				const dx = x - b.x;
-				const dy = y - b.y;
-				const dist = Math.sqrt( dx * dx + dy * dy ) / b.r;
+				// How far inside the brush's track (0 at its edge, 1 on it).
+				let dist = 1;
+				for ( let q = 0; q < P.length; q += 3 ) {
+					const dx = x - P[ q ];
+					const dy = y - P[ q + 1 ];
+					dist = Math.min( dist, Math.sqrt( dx * dx + dy * dy ) / Math.max( 0.5, P[ q + 2 ] ) );
+				}
 				if ( dist >= 1 ) {
 					continue;
 				}
