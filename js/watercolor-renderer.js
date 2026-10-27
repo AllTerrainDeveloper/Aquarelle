@@ -74,12 +74,14 @@ void main() {
 	vec2 uv = sv + ( warpLo + warpHi * 0.9 ) / uSim;
 	vec4 d = dens( uv );
 	vec3 D = max( d.rgb, 0.0 );
-	// Pigment pooling along density fronts (subtle; the simulation does the rest).
+	// Pigment pooling along density fronts (subtle; the simulation does the rest):
+	// where a wash ends, a step large for the paint there, not the grain within
+	// a dark wash, which would darken the whole of it past what was laid.
 	vec2 e = 1.0 / uSim;
 	vec3 gx = dens( uv + vec2( e.x, 0.0 ) ).rgb - dens( uv - vec2( e.x, 0.0 ) ).rgb;
 	vec3 gy = dens( uv + vec2( 0.0, e.y ) ).rgb - dens( uv - vec2( 0.0, e.y ) ).rgb;
-	float front = length( abs( gx ) + abs( gy ) );
-	D *= 1.0 + 0.35 * smoothstep( 0.02, 0.35, front );
+	float front = length( abs( gx ) + abs( gy ) ) / ( dot( D, vec3( 0.3333 ) ) + 0.05 );
+	D *= 1.0 + 0.15 * smoothstep( 0.6, 1.4, front );
 	float w = d.a;
 	float dm = dot( D, vec3( 0.3333 ) );
 	// Granulation + mottling.

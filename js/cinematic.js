@@ -56,6 +56,8 @@ const MAX_HAIR_PX = 54;
 const MAX_ZOOM = 2.4;
 // The closing shot: how much of the view the whole painting fills.
 const FINALE_FILL = 0.94;
+// ...and the seconds over which the brush fades away, leaving the painting alone.
+const FINALE_FADE = 0.8;
 const LOOKAHEAD = 2.5;
 // Broad washes take a bigger brush: up to this much bigger, and this long on screen.
 const MAX_GROW = 2.4;
@@ -197,10 +199,12 @@ export class Director {
 
 	/**
 	 * The closing shot, when a similarity goal is met: the camera glides to
-	 * the whole painting, centred and as large as fits the view.
+	 * the whole painting, centred and as large as fits the view, and the
+	 * brush fades away.
 	 */
 	showWhole() {
 		this.finale = true;
+		this.finaleAt = this.time;
 	}
 
 	/** A new painting: its pigments and the desk around its sheet. */
@@ -292,7 +296,7 @@ export class Director {
 					// Lifted, the hand never wanders off over the desk: it waits at the sheet's edge.
 					p.x = Math.min( this.W, Math.max( 0, p.x ) );
 					p.y = Math.min( this.H, Math.max( 0, p.y ) );
-					return { ...p, lift, id: a, exact: true, stroke: true, ink: ink || a.tip, k, lifting: !! a.lift, focus: { x: a.x, y: a.y } };
+					return { ...p, lift, id: a, exact: true, stroke: true, ink: ink || a.tip, k, blob: a.blob, lifting: !! a.lift, focus: { x: a.x, y: a.y } };
 				}
 			}
 			if ( 'dip' === a.tool && t >= a.start && t <= a.start + a.dur ) {
@@ -301,6 +305,11 @@ export class Director {
 		}
 		const at = this.raw || this.animator.desk.rest;
 		return { x: at.x, y: at.y, dx: 0, dy: 0, lift: 1, press: 0, exact: false };
+	}
+
+	/** The paint the brush takes up for a pose: its pigment, or the mix its stroke carries. */
+	_paint( T ) {
+		return T.blob && T.blob.k === T.k && T.blob.mix ? hexRgb( this.animator.paintOf( T.blob ) ) : this.colors[ T.k ];
 	}
 
 	/** The brush carried to the next mark, or to the jar and the palette and back. */
@@ -314,7 +323,7 @@ export class Director {
 		const g = a.segs[ j ];
 		const u = Math.min( 1, Math.max( 0, e / g.dur ) );
 		const S = this.animator.desk.S;
-		const pose = { dip: ! a.travel, id: a, exact: true, press: 0, dx: 0, dy: 0, k: a.k, seg: g.kind, u };
+		const pose = { dip: ! a.travel, id: a, exact: true, press: 0, dx: 0, dy: 0, k: a.k, blob: a.next?.blob, seg: g.kind, u };
 		if ( 'move' === g.kind || 'out' === g.kind ) {
 			const to = 'out' === g.kind ? ( a.next ? brushPath( a.next, a.next.p0 ?? 0 ) : g.from ) : g.to;
 			if ( 'out' === g.kind && a.next ) {
@@ -480,12 +489,12 @@ export class Director {
 				this.load = Math.max( 0, this.load - dt * 2 );
 				this._stirJar( dt, h );
 			} else if ( 'load' === T.seg && T.k >= 0 ) {
-				this.color = mixRgb( this.color, this.colors[ T.k ], 1 - Math.exp( -dt * 6 ) );
+				this.color = mixRgb( this.color, this._paint( T ), 1 - Math.exp( -dt * 6 ) );
 				this.load = Math.min( 1, this.load + dt * 2 );
 			}
 		} else if ( T.stroke ) {
 			if ( T.k >= 0 && ! T.lifting ) {
-				this.color = mixRgb( this.color, this.colors[ T.k ], 1 - Math.exp( -dt * 8 ) );
+				this.color = mixRgb( this.color, this._paint( T ), 1 - Math.exp( -dt * 8 ) );
 			} else if ( T.k < 0 ) {
 				// Clear water (wet-in-wet, softening, lifting): a clean brush.
 				this.color = mixRgb( this.color, CLEAN, 1 - Math.exp( -dt * 8 ) );
@@ -763,8 +772,11 @@ export class Director {
 		this._drawDesk( ctx, z );
 		const pc = this.pc;
 		this.animator.draw( ctx, t, pc, pc, 1, true );
-		if ( this.animator.showGestures && this.hand ) {
+		const shown = this.finale ? 1 - smooth( 0, FINALE_FADE, this.time - this.finaleAt ) : 1;
+		if ( this.animator.showGestures && this.hand && shown > 0 ) {
+			ctx.globalAlpha = shown;
 			this._drawBrush( ctx, z * dpr );
+			ctx.globalAlpha = 1;
 		}
 		this.recorder?.frame();
 	}

@@ -25,6 +25,7 @@ export class AdaptiveController {
 	reset() {
 		this.level = 0;
 		this.dtScale = 1;
+		this.hold = false;
 		this.fps = 0;
 		this.frames = 0;
 		this.secondStart = 0;
@@ -95,6 +96,10 @@ export class AdaptiveController {
 		} else if ( this.fps >= 58 && work < 13 ) {
 			this.goodSeconds++;
 			this.badSeconds = 0;
+		}
+		if ( this.hold ) {
+			// Lockstep: the quality level stays where it is.
+			return;
 		}
 		if ( this.badSeconds >= 2 && this.level < LEVELS.length - 1 ) {
 			this.level++;

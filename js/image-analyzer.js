@@ -3,7 +3,7 @@
  *
  * Builds a reduced-resolution representation of the reference:
  *  - linear RGB + OKLab maps, luminance
- *  - limited pigment palette (k-means++ in OKLab)
+ *  - a watercolour palette: paints at their masstones, none the others mix
  *  - pigment absorbances (Beer–Lambert) and per-pigment target density maps
  *    obtained by per-pixel non-negative least squares over pigment pairs
  *  - edge, detail, importance and feature-scale maps
@@ -16,6 +16,29 @@ import { SRGB_TO_LINEAR, linearToOklab, oklabToLinear, linearToSrgb, PAPER_LINEA
 import { Rng } from './prng.js';
 
 const MAX_DENSITY = 4;
+// A paint the palette can already make, watered down or mixed, to within
+// this (OKLab, about a just-noticeable difference) is not a new paint.
+const REACH = 0.03;
+// ...or mixed from two of its paints to within this: a mix is harder to
+// lay exactly than one paint.
+const REACH_MIX = 0.015;
+// Choosing the palette, a colour made by mixing counts as this much
+// further off (squared) than one made with a single paint.
+const MIX_COST = 1.5;
+// Colours whose absorbances lie within ~8° are one paint at two strengths.
+const SAME_PAINT = Math.cos( ( 8 * Math.PI ) / 180 );
+// Choosing the palette, a paint goes at most this far past its masstone.
+const OVER_MASSTONE = 1.15;
+// The darkest a masstone gets (absorbance in its strongest channel).
+const MASSTONE_MAX = 3;
+// The strengths at which a paint is compared: a quarter, half and full.
+const TINTS = [ 0.25, 0.5, 1 ];
+// Masking fluid for a small light shape: no darker than this (mean optical
+// density), and lighter than the area around it by this much, and by this
+// share of the area's darkness.
+const MASK_LIGHT = 0.6;
+const MASK_STEP = 0.15;
+const MASK_SHARE = 0.45;
 
 /* ------------------------------------------------------------------ */
 /* Filters                                                              */
@@ -502,10 +525,11 @@ function pigmentAbsorbance( c ) {
 
 /**
  * Weighted least-squares fit of a density vector D by non-negative amounts
- * of 1, 2 or 3 pigments (absorbances As). Returns the weighted error, and
- * the amounts in x, or Infinity when the best fit needs a negative amount.
+ * of 1, 2 or 3 pigments (absorbances As), each at most `cap` times its
+ * absorbance. Returns the weighted error, and the amounts in x, or Infinity
+ * when the best fit needs a negative amount.
  */
-function fitMix( As, D, w, x ) {
+function fitMix( As, D, w, x, cap = MAX_DENSITY ) {
 	const n = As.length;
 	// Normal equations M x = c (n <= 3).
 	const M = [ 0, 0, 0, 0, 0, 0, 0, 0, 0 ];
@@ -519,7 +543,7 @@ function fitMix( As, D, w, x ) {
 		c[ p ] = w[ 0 ] * As[ p ][ 0 ] * D[ 0 ] + w[ 1 ] * As[ p ][ 1 ] * D[ 1 ] + w[ 2 ] * As[ p ][ 2 ] * D[ 2 ];
 	}
 	if ( 1 === n ) {
-		x[ 0 ] = Math.min( MAX_DENSITY, Math.max( 0, c[ 0 ] / M[ 0 ] ) );
+		x[ 0 ] = Math.min( cap, Math.max( 0, c[ 0 ] / M[ 0 ] ) );
 	} else if ( 2 === n ) {
 		const det = M[ 0 ] * M[ 4 ] - M[ 1 ] * M[ 1 ];
 		if ( det < 1e-9 ) {
@@ -546,7 +570,7 @@ function fitMix( As, D, w, x ) {
 		if ( x[ p ] < 0 ) {
 			return Infinity;
 		}
-		x[ p ] = Math.min( MAX_DENSITY, x[ p ] );
+		x[ p ] = Math.min( cap, x[ p ] );
 		for ( let ch = 0; ch < 3; ch++ ) {
 			r[ ch ] -= x[ p ] * As[ p ][ ch ];
 		}
@@ -557,14 +581,40 @@ function fitMix( As, D, w, x ) {
 	return err;
 }
 
+/** Per-channel weights of a density fit: errors show more in light colours. */
+function fitWeights( D ) {
+	return [ Math.exp( -D[ 0 ] ) + 0.06, Math.exp( -D[ 1 ] ) + 0.06, Math.exp( -D[ 2 ] ) + 0.06 ];
+}
+
+/** A paint of absorbance A: its masstone's colours. */
+function paintOf( A ) {
+	const linC = A.map( ( v, ch ) => PAPER_LINEAR[ ch ] * Math.exp( -v ) );
+	const lab = [ 0, 0, 0 ];
+	linearToOklab( linC[ 0 ], linC[ 1 ], linC[ 2 ], lab );
+	const srgb = linC.map( linearToSrgb );
+	return { lab, srgb, hex: toHex( srgb ), A, L: lab[ 0 ], isPaper: Math.max( A[ 0 ], A[ 1 ], A[ 2 ] ) < 0.06 };
+}
+
 /**
- * Picks K pigments for how well their mixes cover the picture, as a
- * painter stocks a palette (a blue and a yellow make the greens), instead
- * of the K most common colours (a big sky would take most of the slots).
- * Greedy: each step adds the candidate whose own tints and two-pigment
- * mixes with the pigments already chosen most reduce the colour error.
+ * A watercolour palette: K paints chosen for how well the picture can be
+ * painted with them, watered down and mixed in pairs, as a painter stocks
+ * one (a blue and a yellow make the greens) instead of taking the K most
+ * common colours (a big sky would take most of the slots, in shades).
+ *
+ * Each candidate colour becomes a paint at its masstone: the strongest
+ * shade of it the picture calls for (its colours that are the same paint,
+ * absorbances within SAME_PAINT). Water only ever makes a paint lighter,
+ * so the tube colour is the darkest of its shades and the light ones come
+ * from it, never the other way round.
+ *
+ * Greedy: each step adds the paint that most reduces the colour error over
+ * the picture, alone or mixed with one already chosen. A paint the palette
+ * can already make (watered down to within REACH of it at each strength,
+ * or mixed from two of its paints to within REACH_MIX) is never added, and one that a later
+ * choice makes redundant is taken off again: its slot goes to the next
+ * colour the picture needs. Returns the paints' absorbances (masstones).
  */
-function mixingPalette( candidates, lin, N, K, rng ) {
+function watercolourPalette( candidates, lin, N, K, rng ) {
 	const S = Math.min( N, 3000 );
 	const Ds = [];
 	const ws = [];
@@ -577,7 +627,7 @@ function mixingPalette( candidates, lin, N, K, rng ) {
 			continue;
 		}
 		Ds.push( [ D[ 0 ], D[ 1 ], D[ 2 ] ] );
-		ws.push( [ Math.exp( -D[ 0 ] ) + 0.06, Math.exp( -D[ 1 ] ) + 0.06, Math.exp( -D[ 2 ] ) + 0.06 ] );
+		ws.push( fitWeights( D ) );
 		const L = [ 0, 0, 0 ];
 		linearToOklab( lin[ i * 3 ], lin[ i * 3 + 1 ], lin[ i * 3 + 2 ], L );
 		labs.push( L );
@@ -585,56 +635,162 @@ function mixingPalette( candidates, lin, N, K, rng ) {
 	// A mix is judged by how different it looks (OKLab), so a dark green is
 	// not an acceptable dark brown even though their densities are close.
 	const look = [ 0, 0, 0 ];
-	const seen = ( As, x, n, s ) => {
+	const x = [ 0, 0, 0 ];
+	const seen = ( As, t ) => {
 		const o = [ 0, 0, 0 ];
-		for ( let p = 0; p < n; p++ ) {
+		for ( let p = 0; p < As.length; p++ ) {
 			for ( let ch = 0; ch < 3; ch++ ) {
 				o[ ch ] += x[ p ] * As[ p ][ ch ];
 			}
 		}
 		linearToOklab( PAPER_LINEAR[ 0 ] * Math.exp( -o[ 0 ] ), PAPER_LINEAR[ 1 ] * Math.exp( -o[ 1 ] ), PAPER_LINEAR[ 2 ] * Math.exp( -o[ 2 ] ), look );
-		const t = labs[ s ];
 		return ( look[ 0 ] - t[ 0 ] ) ** 2 + ( look[ 1 ] - t[ 1 ] ) ** 2 + ( look[ 2 ] - t[ 2 ] ) ** 2;
 	};
-	const mixErr = ( As, s, x ) => ( fitMix( As, Ds[ s ], ws[ s ], x ) < Infinity ? seen( As, x, As.length, s ) : Infinity );
-	const cand = candidates.map( ( c ) => ( { c, A: pigmentAbsorbance( c ) } ) ).filter( ( p ) => Math.max( ...p.A ) >= 0.06 );
-	// Error of each sample with the palette so far (bare paper to start).
-	const cur = Ds.map( ( d, s ) => seen( [], [], 0, s ) );
+	// Paints are laid up to a little past their masstone (a second glaze),
+	// no further: a pale paint does not stand in for a dark one.
+	const mixErr = ( As, d, w, t ) => ( fitMix( As, d, w, x, OVER_MASSTONE ) < Infinity ? seen( As, t ) : Infinity );
+
+	/* Candidates at their masstones ---------------------------------- */
+	const paints = [];
+	for ( const c of candidates ) {
+		const A = pigmentAbsorbance( c );
+		const n = Math.hypot( A[ 0 ], A[ 1 ], A[ 2 ] );
+		if ( Math.max( A[ 0 ], A[ 1 ], A[ 2 ] ) < 0.06 ) {
+			continue; // bare paper
+		}
+		const u = A.map( ( v ) => v / n );
+		const t = [];
+		for ( const d of Ds ) {
+			const along = d[ 0 ] * u[ 0 ] + d[ 1 ] * u[ 1 ] + d[ 2 ] * u[ 2 ];
+			if ( along >= SAME_PAINT * Math.hypot( d[ 0 ], d[ 1 ], d[ 2 ] ) ) {
+				t.push( along );
+			}
+		}
+		t.sort( ( a, b ) => a - b );
+		// Its strongest shade in the picture (a few stray cells aside).
+		let s = Math.max( n, t.length >= 5 ? t[ Math.floor( 0.95 * ( t.length - 1 ) ) ] : 0 );
+		s = Math.min( s, MASSTONE_MAX / Math.max( u[ 0 ], u[ 1 ], u[ 2 ] ) );
+		const Am = u.map( ( v ) => v * s );
+		const tints = TINTS.map( ( f ) => {
+			const Dt = Am.map( ( v ) => v * f );
+			return { D: Dt, w: fitWeights( Dt ), lab: paintOf( Dt ).lab };
+		} );
+		paints.push( { A: Am, u, L: paintOf( Am ).L, tints } );
+	}
+
+	/* Greedy choice --------------------------------------------------- */
+	const P = paints.length;
 	const chosen = [];
-	const x = [ 0, 0, 0 ];
-	while ( chosen.length < K && chosen.length < cand.length ) {
-		let best = -1;
-		let bestGain = -1;
-		let bestErr = null;
-		for ( let c = 0; c < cand.length; c++ ) {
-			if ( chosen.includes( c ) ) {
+	const dropped = new Uint8Array( P );
+	// Can the paints `among` make paint p, watered down or mixed in two, at
+	// each of its strengths? (Dark colours all look alike, so the masstone
+	// alone would say yes too readily.) Nearly the hue of one of them
+	// (SAME_PAINT) and no darker, it is that paint watered down, whatever
+	// the eye says: two of them would spend a slot twice, and the first
+	// washes would lay one where the other belongs (see ColourLevels), the
+	// wrong paint taking the darkness the right one needs (a sky's crimson
+	// washed in magenta stays purple and too dark). A darker one is the
+	// tube colour of the two: it comes in, and the lighter one goes.
+	const reach = ( p, among ) => {
+		const { u, L } = paints[ p ];
+		for ( const a of among ) {
+			const o = paints[ a ];
+			if ( u[ 0 ] * o.u[ 0 ] + u[ 1 ] * o.u[ 1 ] + u[ 2 ] * o.u[ 2 ] >= SAME_PAINT && L >= o.L ) {
+				return true;
+			}
+		}
+		for ( const t of paints[ p ].tints ) {
+			let ok = false;
+			for ( let a = 0; a < among.length && ! ok; a++ ) {
+				ok = mixErr( [ paints[ among[ a ] ].A ], t.D, t.w, t.lab ) < REACH * REACH;
+				for ( let b = a + 1; b < among.length && ! ok; b++ ) {
+					ok = mixErr( [ paints[ among[ a ] ].A, paints[ among[ b ] ].A ], t.D, t.w, t.lab ) < REACH_MIX * REACH_MIX;
+				}
+			}
+			if ( ! ok ) {
+				return false;
+			}
+		}
+		return among.length > 0;
+	};
+	// Error of each sample with the chosen paints (bare paper to start),
+	// and with each other paint added to them.
+	const cur = new Float32Array( Ds.length );
+	const best = paints.map( () => new Float32Array( Ds.length ) );
+	const errors = () => {
+		for ( let s = 0; s < Ds.length; s++ ) {
+			let e = seen( [], labs[ s ] );
+			for ( let a = 0; a < chosen.length; a++ ) {
+				const Aa = paints[ chosen[ a ] ].A;
+				e = Math.min( e, mixErr( [ Aa ], Ds[ s ], ws[ s ], labs[ s ] ) );
+				for ( let b = a + 1; b < chosen.length; b++ ) {
+					e = Math.min( e, MIX_COST * mixErr( [ Aa, paints[ chosen[ b ] ].A ], Ds[ s ], ws[ s ], labs[ s ] ) );
+				}
+			}
+			cur[ s ] = e;
+		}
+		for ( let p = 0; p < P; p++ ) {
+			if ( dropped[ p ] || chosen.includes( p ) ) {
 				continue;
 			}
-			const err = new Float32Array( Ds.length );
+			for ( let s = 0; s < Ds.length; s++ ) {
+				let e = mixErr( [ paints[ p ].A ], Ds[ s ], ws[ s ], labs[ s ] );
+				for ( const c of chosen ) {
+					e = Math.min( e, MIX_COST * mixErr( [ paints[ p ].A, paints[ c ].A ], Ds[ s ], ws[ s ], labs[ s ] ) );
+				}
+				best[ p ][ s ] = e;
+			}
+		}
+	};
+	errors();
+	for ( let step = 0; chosen.length < K && step < 3 * K; step++ ) {
+		let pick = -1;
+		let pickGain = 0;
+		for ( let p = 0; p < P; p++ ) {
+			if ( dropped[ p ] || chosen.includes( p ) ) {
+				continue;
+			}
+			if ( reach( p, chosen ) ) {
+				dropped[ p ] = 1;
+				continue;
+			}
 			let gain = 0;
 			for ( let s = 0; s < Ds.length; s++ ) {
-				let e = mixErr( [ cand[ c ].A ], s, x );
-				for ( const j of chosen ) {
-					e = Math.min( e, mixErr( [ cand[ c ].A, cand[ j ].A ], s, x ) );
-				}
-				err[ s ] = Math.min( cur[ s ], e );
-				gain += cur[ s ] - err[ s ];
+				gain += Math.max( 0, cur[ s ] - best[ p ][ s ] );
 			}
-			if ( gain > bestGain ) {
-				bestGain = gain;
-				best = c;
-				bestErr = err;
+			if ( gain > pickGain ) {
+				pickGain = gain;
+				pick = p;
 			}
 		}
-		if ( best < 0 ) {
+		if ( pick < 0 ) {
 			break;
 		}
-		chosen.push( best );
+		chosen.push( pick );
+		// A paint chosen earlier that the others now make (a green, once its
+		// blue and yellow are in) is taken off, and stays off.
+		const redundant = chosen.filter( ( c ) => c !== pick && reach( c, chosen.filter( ( o ) => o !== c ) ) );
+		for ( const c of redundant ) {
+			chosen.splice( chosen.indexOf( c ), 1 );
+			dropped[ c ] = 1;
+		}
+		if ( redundant.length ) {
+			errors();
+			continue;
+		}
 		for ( let s = 0; s < Ds.length; s++ ) {
-			cur[ s ] = bestErr[ s ];
+			cur[ s ] = Math.min( cur[ s ], best[ pick ][ s ] );
+		}
+		for ( let p = 0; p < P; p++ ) {
+			if ( dropped[ p ] || chosen.includes( p ) ) {
+				continue;
+			}
+			for ( let s = 0; s < Ds.length; s++ ) {
+				best[ p ][ s ] = Math.min( best[ p ][ s ], MIX_COST * mixErr( [ paints[ p ].A, paints[ pick ].A ], Ds[ s ], ws[ s ], labs[ s ] ) );
+			}
 		}
 	}
-	return chosen.map( ( c ) => cand[ c ].c );
+	return chosen.map( ( p ) => paints[ p ].A );
 }
 
 /* ------------------------------------------------------------------ */
@@ -736,47 +892,65 @@ export function analyzeImage( { width: W, height: H, pixels, K: K0, seed, exclud
 	mark( 'importance' );
 
 	/* Palette ------------------------------------------------------- */
-	// Illustrations: their own flat colours. Photos: pigments chosen for how
-	// well they mix into the picture's colours.
-	const centers = photo ? mixingPalette( kmeans( lab, N, Math.min( 32, K0 * 3 ), rng ), lin, N, K0, rng ) : kmeans( lab, N, K0, rng );
-	centers.sort( ( a, b ) => b[ 0 ] - a[ 0 ] );
+	// The picture's main colours (its shapes, see Segmentation), and the
+	// paints to make them with, chosen as a watercolourist would (see
+	// watercolourPalette) from those colours and a finer set. In an
+	// illustration, bare paper keeps its own slot.
+	const shades = kmeans( lab, N, K0, rng );
+	const paperShade = photo ? null : shades.find( ( c ) => paintOf( pigmentAbsorbance( c ) ).isPaper );
+	const paints = watercolourPalette( shades.concat( kmeans( lab, N, Math.min( 48, K0 * 3 ), rng ) ), lin, N, K0 - ( paperShade ? 1 : 0 ), rng );
+	const all = paints.map( paintOf );
+	if ( paperShade ) {
+		all.push( paintOf( pigmentAbsorbance( paperShade ) ) );
+	}
+	all.sort( ( a, b ) => b.L - a.L );
 	const tmp = [ 0, 0, 0 ];
-	const all = centers.map( ( c ) => {
-		oklabToLinear( c[ 0 ], c[ 1 ], c[ 2 ], tmp );
-		const linC = tmp.map( ( v ) => Math.max( 0, Math.min( 1, v ) ) );
-		const A = linC.map( ( v, ch ) => -Math.log( Math.min( 0.999, Math.max( 0.03, v / PAPER_LINEAR[ ch ] ) ) ) );
-		const srgb = linC.map( linearToSrgb );
-		const strength = Math.max( A[ 0 ], A[ 1 ], A[ 2 ] );
-		return { lab: c, srgb, hex: toHex( srgb ), A, L: c[ 0 ], isPaper: strength < 0.06 };
-	} );
-	// Colours the user dragged onto another: wherever the image uses colour A
-	// it now uses colour B, keeping its light and shade (shift in OKLab).
+	// Colours the user dragged onto another: wherever the image uses paint A
+	// it now uses paint B, as much of it, keeping its light and shade.
 	const mapTo = new Map( remap.filter( ( [ a, b ] ) => a !== b && all[ a ] && all[ b ] ) );
 	if ( mapTo.size ) {
+		const live = all.map( ( p, k ) => k ).filter( ( k ) => ! all[ k ].isPaper );
+		const D = [ 0, 0, 0 ];
+		const x = [ 0, 0, 0 ];
 		for ( let i = 0; i < N; i++ ) {
-			let best = 0;
-			let bd = Infinity;
-			for ( let c = 0; c < all.length; c++ ) {
-				const dl = lab[ i * 3 ] - all[ c ].lab[ 0 ];
-				const da = lab[ i * 3 + 1 ] - all[ c ].lab[ 1 ];
-				const db = lab[ i * 3 + 2 ] - all[ c ].lab[ 2 ];
-				const d = dl * dl + da * da + db * db;
-				if ( d < bd ) {
-					bd = d;
-					best = c;
-				}
-			}
-			const to = mapTo.get( best );
-			if ( undefined === to ) {
+			opticalDensity( lin[ i * 3 ], lin[ i * 3 + 1 ], lin[ i * 3 + 2 ], D );
+			if ( D[ 0 ] + D[ 1 ] + D[ 2 ] < 0.03 ) {
 				continue;
 			}
-			for ( let ch = 0; ch < 3; ch++ ) {
-				lab[ i * 3 + ch ] += all[ to ].lab[ ch ] - all[ best ].lab[ ch ];
+			// The paints that make this cell: the best one, or two of the
+			// three best.
+			const w = fitWeights( D );
+			const top = live.map( ( k ) => [ k, fitMix( [ all[ k ].A ], D, w, x ) ] ).sort( ( p, q ) => p[ 1 ] - q[ 1 ] ).slice( 0, 3 );
+			if ( ! top.length ) {
+				break;
 			}
-			oklabToLinear( lab[ i * 3 ], lab[ i * 3 + 1 ], lab[ i * 3 + 2 ], tmp );
-			for ( let ch = 0; ch < 3; ch++ ) {
-				lin[ i * 3 + ch ] = Math.max( 0, Math.min( 1, tmp[ ch ] ) );
+			let used = [ top[ 0 ][ 0 ] ];
+			let err = top[ 0 ][ 1 ];
+			for ( let p = 0; p < top.length; p++ ) {
+				for ( let q = p + 1; q < top.length; q++ ) {
+					const e = fitMix( [ all[ top[ p ][ 0 ] ].A, all[ top[ q ][ 0 ] ].A ], D, w, x ) * 1.04 + 1e-5;
+					if ( e < err ) {
+						err = e;
+						used = [ top[ p ][ 0 ], top[ q ][ 0 ] ];
+					}
+				}
 			}
+			if ( ! used.some( ( k ) => mapTo.has( k ) ) ) {
+				continue;
+			}
+			fitMix( used.map( ( k ) => all[ k ].A ), D, w, x );
+			used.forEach( ( k, j ) => {
+				const to = mapTo.get( k );
+				if ( undefined !== to ) {
+					for ( let ch = 0; ch < 3; ch++ ) {
+						D[ ch ] += x[ j ] * ( all[ to ].A[ ch ] - all[ k ].A[ ch ] );
+					}
+				}
+			} );
+			for ( let ch = 0; ch < 3; ch++ ) {
+				lin[ i * 3 + ch ] = PAPER_LINEAR[ ch ] * Math.exp( -Math.max( 0, D[ ch ] ) );
+			}
+			linearToOklab( lin[ i * 3 ], lin[ i * 3 + 1 ], lin[ i * 3 + 2 ], lab, i * 3 );
 		}
 	}
 	// Colours the user took off the palette (or transformed into another):
@@ -850,7 +1024,10 @@ export function analyzeImage( { width: W, height: H, pixels, K: K0, seed, exclud
 		let kb = -1;
 		let xa = singles[ b1 * 2 ];
 		let xb = 0;
-		const cands = [ b1, b2, b3 ].filter( ( k ) => k >= 0 );
+		// Any two paints: the palette leaves out what two of its paints mix
+		// (see watercolourPalette), so a green may be its blue and its
+		// yellow though neither fits well alone.
+		const cands = active;
 		for ( let p = 0; p < cands.length; p++ ) {
 			for ( let q = p + 1; q < cands.length; q++ ) {
 				const Ai = pigments[ cands[ p ] ].A;
@@ -953,47 +1130,85 @@ export function analyzeImage( { width: W, height: H, pixels, K: K0, seed, exclud
 	mark( 'pyramid' );
 
 	/* Segmentation -------------------------------------------------- */
-	let labels = new Uint8Array( N );
+	// Shapes: areas of one of the picture's main colours (so the light and
+	// the dark of one paint stay apart), each labelled with the paint that
+	// makes it, the one it takes the most of (or bare paper).
+	const paperK = pigments.findIndex( ( p ) => p.isPaper );
+	const strength = pigments.map( ( p ) => Math.max( p.A[ 0 ], p.A[ 1 ], p.A[ 2 ] ) );
+	const bareShade = shades.map( ( c ) => paintOf( pigmentAbsorbance( c ) ).isPaper );
+	// Cell key: shade * 32 + paint (K <= 17).
+	let seg = new Uint16Array( N );
 	for ( let i = 0; i < N; i++ ) {
-		let best = 0;
+		let sh = 0;
 		let bd = Infinity;
-		for ( let k = 0; k < K; k++ ) {
-			const c = pigments[ k ].lab;
-			const dl = lab[ i * 3 ] - c[ 0 ];
-			const da = lab[ i * 3 + 1 ] - c[ 1 ];
-			const db = lab[ i * 3 + 2 ] - c[ 2 ];
-			const d = dl * dl + da * da + db * db;
+		for ( let c = 0; c < shades.length; c++ ) {
+			const d = ( lab[ i * 3 ] - shades[ c ][ 0 ] ) ** 2 + ( lab[ i * 3 + 1 ] - shades[ c ][ 1 ] ) ** 2 + ( lab[ i * 3 + 2 ] - shades[ c ][ 2 ] ) ** 2;
 			if ( d < bd ) {
 				bd = d;
-				best = k;
+				sh = c;
 			}
 		}
-		labels[ i ] = best;
+		let k = -1;
+		if ( bareShade[ sh ] && paperK >= 0 ) {
+			k = paperK;
+		} else {
+			let most = 0;
+			for ( let j = 0; j < K; j++ ) {
+				const v = pigments[ j ].isPaper ? 0 : T0[ j ][ i ] * strength[ j ];
+				if ( v > most ) {
+					most = v;
+					k = j;
+				}
+			}
+		}
+		if ( k < 0 ) {
+			// Nothing to paint: bare paper, or the nearest paint where there is none.
+			k = paperK;
+			if ( k < 0 ) {
+				let kd = Infinity;
+				for ( let j = 0; j < K; j++ ) {
+					const c = pigments[ j ].lab;
+					const d = ( lab[ i * 3 ] - c[ 0 ] ) ** 2 + ( lab[ i * 3 + 1 ] - c[ 1 ] ) ** 2 + ( lab[ i * 3 + 2 ] - c[ 2 ] ) ** 2;
+					if ( d < kd ) {
+						kd = d;
+						k = j;
+					}
+				}
+			}
+		}
+		seg[ i ] = sh * 32 + k;
 	}
-	const counts = new Uint16Array( K );
+	// Ragged borders and specks go: a few passes of a 3x3 majority filter.
+	const around = new Uint16Array( 9 );
 	for ( let pass = 0; pass < 2; pass++ ) {
-		const next = new Uint8Array( N );
+		const next = new Uint16Array( N );
 		for ( let y = 0; y < H; y++ ) {
 			for ( let x = 0; x < W; x++ ) {
-				counts.fill( 0 );
+				let n = 0;
 				for ( let dy = -1; dy <= 1; dy++ ) {
 					const yy = Math.min( H - 1, Math.max( 0, y + dy ) );
 					for ( let dx = -1; dx <= 1; dx++ ) {
-						const xx = Math.min( W - 1, Math.max( 0, x + dx ) );
-						counts[ labels[ yy * W + xx ] ]++;
+						around[ n++ ] = seg[ yy * W + Math.min( W - 1, Math.max( 0, x + dx ) ) ];
 					}
 				}
-				let best = labels[ y * W + x ];
-				for ( let k = 0; k < K; k++ ) {
-					if ( counts[ k ] > counts[ best ] ) {
-						best = k;
+				let best = seg[ y * W + x ];
+				let bestN = 0;
+				for ( let p = 0; p < 9; p++ ) {
+					let c = 0;
+					for ( let q = 0; q < 9; q++ ) {
+						c += around[ q ] === around[ p ] ? 1 : 0;
+					}
+					if ( c > bestN || ( c === bestN && around[ p ] === seg[ y * W + x ] ) ) {
+						bestN = c;
+						best = around[ p ];
 					}
 				}
 				next[ y * W + x ] = best;
 			}
 		}
-		labels = next;
+		seg = next;
 	}
+	const labels = Uint8Array.from( seg, ( v ) => v & 31 );
 	const regionOf = new Int32Array( N ).fill( -1 );
 	const regions = [];
 	const stack = new Int32Array( N );
@@ -1002,7 +1217,7 @@ export function analyzeImage( { width: W, height: H, pixels, K: K0, seed, exclud
 			continue;
 		}
 		const id = regions.length;
-		const lbl = labels[ s ];
+		const lbl = seg[ s ];
 		let sp = 0;
 		stack[ sp++ ] = s;
 		regionOf[ s ] = id;
@@ -1036,26 +1251,26 @@ export function analyzeImage( { width: W, height: H, pixels, K: K0, seed, exclud
 			if ( y > maxY ) {
 				maxY = y;
 			}
-			if ( x > 0 && regionOf[ i - 1 ] < 0 && labels[ i - 1 ] === lbl ) {
+			if ( x > 0 && regionOf[ i - 1 ] < 0 && seg[ i - 1 ] === lbl ) {
 				regionOf[ i - 1 ] = id;
 				stack[ sp++ ] = i - 1;
 			}
-			if ( x < W - 1 && regionOf[ i + 1 ] < 0 && labels[ i + 1 ] === lbl ) {
+			if ( x < W - 1 && regionOf[ i + 1 ] < 0 && seg[ i + 1 ] === lbl ) {
 				regionOf[ i + 1 ] = id;
 				stack[ sp++ ] = i + 1;
 			}
-			if ( y > 0 && regionOf[ i - W ] < 0 && labels[ i - W ] === lbl ) {
+			if ( y > 0 && regionOf[ i - W ] < 0 && seg[ i - W ] === lbl ) {
 				regionOf[ i - W ] = id;
 				stack[ sp++ ] = i - W;
 			}
-			if ( y < H - 1 && regionOf[ i + W ] < 0 && labels[ i + W ] === lbl ) {
+			if ( y < H - 1 && regionOf[ i + W ] < 0 && seg[ i + W ] === lbl ) {
 				regionOf[ i + W ] = id;
 				stack[ sp++ ] = i + W;
 			}
 		}
 		regions.push( {
 			id,
-			label: lbl,
+			label: lbl & 31,
 			area,
 			cx: sx / area,
 			cy: sy / area,
@@ -1092,41 +1307,59 @@ export function analyzeImage( { width: W, height: H, pixels, K: K0, seed, exclud
 	for ( let i = 0; i < N; i++ ) {
 		white[ i ] = Dt[ i * 3 ] + Dt[ i * 3 + 1 ] + Dt[ i * 3 + 2 ] < 0.12 ? 1 : 0;
 	}
-	const wDepth = chamferInside( white, W, H );
 	const thinMax = Math.max( 2.5, B * 0.02 );
 	const reserve = new Uint8Array( N );
-	const wSeen = new Uint8Array( N );
-	const wStack = new Int32Array( N );
 	let reserved = 0;
-	for ( let s0 = 0; s0 < N; s0++ ) {
-		if ( ! white[ s0 ] || wSeen[ s0 ] ) {
-			continue;
-		}
-		let sp = 0;
-		wStack[ sp++ ] = s0;
-		wSeen[ s0 ] = 1;
-		const comp = [];
-		let thickest = 0;
-		while ( sp > 0 ) {
-			const c = wStack[ --sp ];
-			comp.push( c );
-			thickest = Math.max( thickest, wDepth[ c ] );
-			const x = c % W;
-			const y = ( c / W ) | 0;
-			for ( const n of [ x > 0 ? c - 1 : -1, x < W - 1 ? c + 1 : -1, y > 0 ? c - W : -1, y < H - 1 ? c + W : -1 ] ) {
-				if ( n >= 0 && white[ n ] && ! wSeen[ n ] ) {
-					wSeen[ n ] = 1;
-					wStack[ sp++ ] = n;
+	// Masks the components of `mask` that are thin and small with `value`.
+	const maskOut = ( mask, value, maxArea ) => {
+		const depth = chamferInside( mask, W, H );
+		const seen = new Uint8Array( N );
+		const stack = new Int32Array( N );
+		for ( let s0 = 0; s0 < N; s0++ ) {
+			if ( ! mask[ s0 ] || seen[ s0 ] ) {
+				continue;
+			}
+			let sp = 0;
+			stack[ sp++ ] = s0;
+			seen[ s0 ] = 1;
+			const comp = [];
+			let thickest = 0;
+			while ( sp > 0 ) {
+				const c = stack[ --sp ];
+				comp.push( c );
+				thickest = Math.max( thickest, depth[ c ] );
+				const x = c % W;
+				const y = ( c / W ) | 0;
+				for ( const n of [ x > 0 ? c - 1 : -1, x < W - 1 ? c + 1 : -1, y > 0 ? c - W : -1, y < H - 1 ? c + W : -1 ] ) {
+					if ( n >= 0 && mask[ n ] && ! seen[ n ] ) {
+						seen[ n ] = 1;
+						stack[ sp++ ] = n;
+					}
 				}
 			}
-		}
-		if ( thickest <= thinMax && comp.length < N * 0.02 ) {
-			for ( const c of comp ) {
-				reserve[ c ] = 1;
+			if ( thickest <= thinMax && comp.length < maxArea ) {
+				for ( const c of comp ) {
+					reserve[ c ] = value;
+				}
+				reserved += comp.length;
 			}
-			reserved += comp.length;
 		}
+	};
+	maskOut( white, 1, N * 0.02 );
+	// Small light shapes in a darker area (flowers in the grass, lit windows,
+	// a catchlight) are masked too, but only until the details: the washes
+	// and glazes go over the mask, then it is rubbed off and they are painted
+	// in their own colour on clean paper. A light colour laid over the
+	// grass's green would stay green. Marked 2. Lighter than the area around
+	// them: than what closing (a max, then a min filter) leaves where they
+	// were, i.e. the area with its small light holes filled.
+	const closeR = Math.max( 1, Math.round( thinMax ) );
+	const area = minFilter( maxFilter( darkness, W, H, closeR ), W, H, closeR );
+	const speck = new Uint8Array( N );
+	for ( let i = 0; i < N; i++ ) {
+		speck[ i ] = ! reserve[ i ] && darkness[ i ] < MASK_LIGHT && area[ i ] - darkness[ i ] > Math.max( MASK_STEP, MASK_SHARE * area[ i ] ) ? 1 : 0;
 	}
+	maskOut( speck, 2, ( B * 0.03 ) ** 2 );
 	mark( 'reserve' );
 
 	/* Room for a drop: distance to the nearest border -------------------- */

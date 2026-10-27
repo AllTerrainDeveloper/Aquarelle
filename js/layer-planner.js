@@ -33,7 +33,8 @@ export const LAYERS = [
 	{ id: 'wash', name: 'First wash: light and loose', t0: 0.0, t1: 0.24 },
 	{ id: 'mid', name: 'Mid-tones, shape by shape', t0: 0.27, t1: 0.55 },
 	{ id: 'glaze', name: 'Shadow glazes', t0: 0.58, t1: 0.75 },
-	{ id: 'detail', name: 'Darks & details', t0: 0.77, t1: 0.88 },
+	// The masking fluid comes off before the details (see unmasked).
+	{ id: 'detail', name: 'Darks & details', t0: 0.77, t1: 0.88, unmask: true },
 	{ id: 'finish', name: 'Finish: filling what was missed', t0: 0.89, t1: 0.97 },
 ];
 
@@ -1154,7 +1155,16 @@ const strokeSecs = ( B, st, w ) => 0.6 + st.len / brushSpeed( B, w );
  * @return {{ ops: Object[], target: Float32Array, dens: Float32Array }}
  *         op.t is painting seconds from the start of the layer.
  */
+/** Whether the masking fluid laid until the details is off by `layer`. */
+export function unmasked( layer ) {
+	return LAYERS.slice( 0, layer + 1 ).some( ( L ) => L.unmask );
+}
+
 export function planLayer( ctx, layer, state ) {
+	if ( unmasked( layer ) && ! ctx.unmasked ) {
+		// From the details on, the shapes masked until then are paper to paint.
+		ctx = { ...ctx, unmasked: true, an: { ...ctx.an, reserve: ctx.an.reserve.map( ( v ) => ( 2 === v ? 0 : v ) ) } };
+	}
 	const { an, W, H, B, N, K, meanA, edgeNear } = ctx;
 	const { pigments, importance, regions, regionOf, reserve } = an;
 	const rng = new Rng( ( ctx.seed * 31 + layer * 7919 + ( state.seed || 0 ) ) >>> 0 );

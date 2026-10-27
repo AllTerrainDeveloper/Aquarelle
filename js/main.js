@@ -82,6 +82,9 @@ const animation = new AnimationController( {
 	onStats: updateHud,
 	onDone: handleDone,
 } );
+// ?lockstep: frames of a fixed length and no time budgets, so a painting
+// (and its benchmark score) comes out the same on every run.
+animation.lockstep = params.has( 'lockstep' );
 // Cinematic: the camera, the desk and the strand brush.
 const director = new Director( { stage: $( 'canvases' ), figure: document.querySelector( '.canvases .paint' ), overlay: $( 'overlay' ), renderer } );
 animation.director = director;

@@ -18,6 +18,8 @@
  * Paint never comes from the overlay.
  */
 
+import { mixHex } from './color.js';
+
 /** '#rrggbb' or 'rgba(r,g,b,a)' -> [r, g, b] (0–255). */
 function rgbOf( color ) {
 	if ( '#' === color[ 0 ] ) {
@@ -247,6 +249,7 @@ const flightSecs = ( d, S ) => 0.3 + 1.5 * Math.sqrt( d / S );
 export class GestureAnimator {
 	constructor( model, pigments ) {
 		this.model = model;
+		this.pigments = pigments;
 		this.colors = pigments.map( ( p ) => p.hex );
 		this.actions = [];
 		this.showGestures = true;
@@ -482,6 +485,17 @@ export class GestureAnimator {
 	 * Draws the hand: drops, particles, brush, tissue. With `scene` (Cinematic)
 	 * the caller has cleared and placed the canvas and draws the brush itself.
 	 */
+	/** The colour a gesture's brush carries: its pigment, or its mix. */
+	paintOf( blob ) {
+		if ( ! blob.mix ) {
+			return this.colors[ blob.k ];
+		}
+		if ( blob.mixHex?.mix !== blob.mix ) {
+			blob.mixHex = { mix: blob.mix, hex: mixHex( this.pigments, blob.k, blob.mix ) };
+		}
+		return blob.mixHex.hex;
+	}
+
 	draw( ctx, t, sx, sy, dpr, scene = false ) {
 		const cw = ctx.canvas.width;
 		const ch = ctx.canvas.height;
@@ -507,7 +521,7 @@ export class GestureAnimator {
 		for ( const a of this.actions ) {
 			if ( 'brush' === a.tool ) {
 				// A clean, damp brush for clear water and for lifting.
-				const color = a.color || ( a.blob && a.blob.k >= 0 ? this.colors[ a.blob.k ] : '#c9c0ae' );
+				const color = a.color || ( a.blob && a.blob.k >= 0 ? this.paintOf( a.blob ) : '#c9c0ae' );
 				this._brush( ctx, a, t, view, color );
 			}
 		}

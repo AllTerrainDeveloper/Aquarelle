@@ -149,9 +149,26 @@ be lighter (lit windows) with a damp brush, and dabs in windows, flowers
 and other dot-sized details with the brush tip. A last pass fills anything
 still bare.
 
-Pigments for a photo are chosen for how well they mix into its colours
-(judged by how different the mixes look in OKLab), not as its most common
-colours, and each area may mix up to three of them. Detection uses the share of pixels with fine,
+**The palette** is stocked as a watercolourist would, for photos and
+illustrations alike: paints chosen for how well the picture can be painted
+with them, watered down and mixed in pairs (judged by how different the
+mixes look in OKLab), not its most common colours. Each paint is taken at
+its masstone, the strongest shade of it the picture uses: water only ever
+makes a paint lighter, so the light shades come from the dark one, never
+the other way round. A colour the palette can already make, watered down
+from one of its paints (to within a just-noticeable difference at a
+quarter, half and full strength) or mixed from two (closer still), is left
+off, and so is one of nearly a chosen paint's hue and no darker (it is that
+paint watered down; a darker one replaces it as the tube colour), and its slot goes to the next colour the picture needs; a paint a
+later choice makes redundant is taken off again. So a picture with seven
+shades of one blue gets one blue, and the palette is often shorter than
+the colours allowed. Shapes still follow the picture's own colours, so the
+light and the dark of one paint stay separate areas. Each area may mix two
+paints (a photo's, up to three), and **the brush mixes them on the
+palette**: a stroke whose cells call for a second paint carries both, in
+the ratio they need (and Cinematic's brush shows the mix). Laid one after
+the other, the first would take the cell's darkness and the second could
+not follow, a dark brown left red. Detection uses the share of pixels with fine,
 non-edge texture (photos ≈0.25–0.3, flat artwork < 0.08). A higher Detail
 setting keeps finer shapes: the photo filters span a fixed share of the
 picture, sampled sparsely so analysis stays fast (≈0.7 s at Balanced,
@@ -159,8 +176,8 @@ picture, sampled sparsely so analysis stays fast (≈0.7 s at Balanced,
 
 **Palette editing:** after analysis, click a colour in the palette to remove
 it (the painter mixes that area from the remaining pigments), or drag a
-colour onto another to paint it as that colour (a recolour in OKLab that
-keeps the image's light and shade). Click a removed or transformed colour to
+colour onto another to paint it as that colour (as much of the new paint
+wherever the old one was used, so the image's light and shade stay). Click a removed or transformed colour to
 restore it.
 
 URL options: `?sample=portrait|landscape|lowcolor|detailed|contrast|lettering`
@@ -169,7 +186,10 @@ similarity and FPS, per-subsystem timings, wet-area and error views, the
 benchmark button), which is hidden otherwise; `?instant=1` (QA) applies paint without the
 animated hand; `?bench=1&benchSpeed=16&benchRt=20` runs the benchmark
 (each image is timed at 1× for `benchRt` seconds, then finished at
-`benchSpeed`×).
+`benchSpeed`×); `?lockstep=1` paints in frames of a fixed length with no
+millisecond work budgets, the timeline waiting for every evaluation and
+layer plan, so the same image, palette and seed give the same painting and
+score on every run, however busy the machine (for comparing changes).
 
 ## Technical proposal
 
@@ -180,10 +200,14 @@ across the whole sheet. Each layer is planned (in a worker) when the painter
 reaches it, from what is actually on the paper. The painting clock pauses
 for that moment of stepping back.
 
-0. **Read the values.** Analysis (worker) finds a limited palette (k-means++
-   in OKLab), decomposes every pixel into pigment amounts (Beer–Lambert,
-   non-negative least squares over pigment pairs), and finds the big areas,
-   real edges, and the thin whites to mask (lettering, highlights).
+0. **Read the values.** Analysis (worker) stocks a limited palette (see
+   *The palette* above), decomposes every pixel into pigment amounts
+   (Beer–Lambert, non-negative least squares over pigment pairs), and finds the big areas,
+   real edges, and what to mask: thin whites (lettering, highlights) for
+   good, and small shapes clearly lighter than the area around them
+   (flowers in the grass, lit windows, a catchlight) until the details,
+   when the mask is rubbed off and they are painted on clean paper (a light
+   colour laid over the grass's green would stay green).
 1. **First wash: light and loose.** Every big area, biggest first, gets its
    lightest version: big drops poured in (sized to fit), spread with a broad
    wet brush, its other colours dropped in while wet, plus a few splashes.
@@ -282,7 +306,9 @@ granulation and backruns all emerge from it.
   left, fibres, uneven sizing; subtractive mixing: yellow over blue reads
   green), domain-warped edges (crisp, organic borders far
   above grid resolution), granulation in paper valleys, pigment mottling,
-  pooling on density fronts, paper relief lighting, and a wet sheen.
+  pooling where a wash ends (a step that is large for the paint there, not
+  the grain within a dark wash, so the painting keeps the value the
+  simulation laid), paper relief lighting, and a wet sheen.
 - **2D overlay:** draws the artist's hand: falling drops with converging
   shadows, satellite droplets flying on arcs, a round brush (lacquered
   handle, crimped ferrule, a pigment-loaded hair belly that bends behind

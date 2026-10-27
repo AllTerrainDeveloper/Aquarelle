@@ -27,6 +27,9 @@ const EMPTY_RUN = 3;
 // stay the same, to its first decimal, before that counts as the goal: the
 // painting has gone as far as it will.
 const PLATEAU_SECS = 30 * 60;
+// Lockstep (?lockstep, for benchmarks): every frame this long, whatever
+// the device does.
+const LOCKSTEP_MS = 1000 / 60;
 
 export class AnimationController {
 	constructor( { renderer, adaptive, evaluate, planLayer, onStats, onDone } ) {
@@ -38,6 +41,11 @@ export class AnimationController {
 		this.onDone = onDone;
 		this.state = 'idle';
 		this.speed = 1;
+		// Lockstep: a painting that depends on nothing but its inputs (frames
+		// of a fixed length, no work budgets in milliseconds, the timeline
+		// waiting for every evaluation and layer plan), so two runs agree and
+		// a benchmark measures the painter, not the machine's load.
+		this.lockstep = false;
 		this.setMode( 'paint' );
 		this.last = 0;
 		this._loop = this._loop.bind( this );
@@ -59,6 +67,9 @@ export class AnimationController {
 	reset() {
 		this.model.reset();
 		this.animator.reset();
+		// Retries of a stroke on wet paper are spread out by this, not by
+		// chance, so a painting comes out the same every time.
+		this.jitter = new Rng( 0x5eed );
 		this.splash._washes = null;
 		this.simTime = 0;
 		this.target = 0;
@@ -101,6 +112,7 @@ export class AnimationController {
 		this.model.setLayer( null );
 		this.state = 'ready';
 		this.adaptive.reset();
+		this.adaptive.hold = this.lockstep;
 		this.renderer.needsDraw = true;
 	}
 
@@ -470,7 +482,7 @@ export class AnimationController {
 		if ( concrete.defers > 6 ) {
 			concrete.force = true;
 		}
-		concrete.t = this.simTime + this.drying.retryDelay() * ( 1 + Math.random() * 0.5 );
+		concrete.t = this.simTime + this.drying.retryDelay() * ( 1 + this.jitter.float() * 0.5 );
 		this.deferred.push( concrete );
 	}
 
@@ -544,6 +556,10 @@ export class AnimationController {
 		}
 		const L = layers[ idx ];
 		this.layerPending = true;
+		// The masking fluid comes off before the details (see LAYERS).
+		if ( layers.slice( 0, idx + 1 ).some( ( l ) => l.unmask ) ) {
+			this.model.liftMask();
+		}
 		const cur = this.model.snapshotPigment();
 		const epoch = this.epoch = ( this.epoch || 0 ) + 1;
 		// Open-ended modes plan without time limits: they paint everything.
@@ -617,7 +633,7 @@ export class AnimationController {
 	_simulate( frameStart ) {
 		const q = this.adaptive.q;
 		this._maybeNextLayer();
-		const deadline = frameStart + q.simBudget;
+		const deadline = this.lockstep ? Infinity : frameStart + q.simBudget;
 		const ops = this.plan.ops;
 		const dt = BASE_DT * this.adaptive.dtScale;
 		let opsThisFrame = 0;
@@ -661,7 +677,7 @@ export class AnimationController {
 		}
 		// Gestures advance once per frame: their deposits are progressive anyway.
 		const tg = performance.now();
-		this.animator.update( this.animator.clock, this.adaptive.q.gestureBudget );
+		this.animator.update( this.animator.clock, this.lockstep ? Infinity : this.adaptive.q.gestureBudget );
 		opMs += performance.now() - tg;
 		this.adaptive.record( 'ops', opMs );
 		this.adaptive.record( 'sim', simMs );
@@ -688,9 +704,11 @@ export class AnimationController {
 
 	_loop( now ) {
 		requestAnimationFrame( this._loop );
-		const dtMs = this.last ? Math.min( 250, now - this.last ) : 16.7;
+		const dtMs = this.lockstep ? LOCKSTEP_MS : this.last ? Math.min( 250, now - this.last ) : 16.7;
 		this.last = now;
-		const painting = 'painting' === this.state;
+		// In lockstep the painting holds still while the worker evaluates or
+		// plans: what it sends back lands on the same frame every time.
+		const painting = 'painting' === this.state && ! ( this.lockstep && ( this.evalPending || this.layerPending ) );
 		this.adaptive.frame( now, dtMs, painting );
 		if ( ! this.model ) {
 			return;
@@ -722,7 +740,7 @@ export class AnimationController {
 			const cap = atEnd ? Infinity : this.duration;
 			this.target = Math.min( cap, this.target + dtPaint );
 			this._simulate( frameStart );
-			this._maybeEvaluate( now );
+			this._maybeEvaluate( this.lockstep ? this.paintedReal * 1000 : now );
 			if ( this.finishing && 0 === this.model.activeTiles ) {
 				this.state = 'done';
 				// A goal met (either way): Cinematic's camera steps back to the
