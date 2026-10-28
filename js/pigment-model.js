@@ -791,6 +791,9 @@ export class PigmentModel {
 
 	/** Sponge lift: removes pigment (correcting regions that went too dark). */
 	lift( b ) {
+		if ( b.scrub ) {
+			return this.scrub( b );
+		}
 		const { W, H } = this;
 		// A blot (x, y, r), or a line drawn with the damp brush: `path`, points
 		// x, y and the brush's radius there.
@@ -844,6 +847,87 @@ export class PigmentModel {
 		}
 		this._touch( x0, y0, x1, y1, bits, true );
 		return removed;
+	}
+
+	/**
+	 * Scrub: a damp brush worked over an overworked patch loosens the paint
+	 * and evens it out, each pigment drawn towards its mix just around (a
+	 * fleck merges into what is round it, a pinhole of paper fills from
+	 * its neighbours). Nothing is added or taken away; masked paper is
+	 * left alone. Same track as a lift (`path`, or x, y, r).
+	 */
+	scrub( b ) {
+		const { W, H, K } = this;
+		const P = b.path || [ b.x, b.y, b.r ];
+		let x0 = W;
+		let y0 = H;
+		let x1 = 0;
+		let y1 = 0;
+		for ( let q = 0; q < P.length; q += 3 ) {
+			const R = P[ q + 2 ] + 2;
+			x0 = Math.min( x0, Math.max( 0, Math.floor( P[ q ] - R ) ) );
+			x1 = Math.max( x1, Math.min( W - 1, Math.ceil( P[ q ] + R ) ) );
+			y0 = Math.min( y0, Math.max( 0, Math.floor( P[ q + 1 ] - R ) ) );
+			y1 = Math.max( y1, Math.min( H - 1, Math.ceil( P[ q + 1 ] + R ) ) );
+		}
+		const bw = x1 - x0 + 1;
+		const bh = y1 - y0 + 1;
+		// Paint as it is (deposited and still afloat), read before any moves.
+		const v = new Float32Array( K * bw * bh );
+		for ( let k = 0; k < K; k++ ) {
+			for ( let y = 0; y < bh; y++ ) {
+				for ( let x = 0; x < bw; x++ ) {
+					const i = ( y0 + y ) * W + x0 + x;
+					v[ ( k * bh + y ) * bw + x ] = this.d[ k ][ i ] + this.g[ k ][ i ];
+				}
+			}
+		}
+		const open = ( x, y ) => ! this.reserve[ ( y0 + y ) * W + x0 + x ];
+		let bits = 0;
+		for ( let y = 0; y < bh; y++ ) {
+			for ( let x = 0; x < bw; x++ ) {
+				if ( ! open( x, y ) ) {
+					continue;
+				}
+				let dist = 1;
+				for ( let q = 0; q < P.length; q += 3 ) {
+					dist = Math.min( dist, Math.hypot( x0 + x - P[ q ], y0 + y - P[ q + 1 ] ) / Math.max( 0.5, P[ q + 2 ] ) );
+				}
+				if ( dist >= 1 ) {
+					continue;
+				}
+				const m = Math.min( 1, ( 1 - dist ) * 2.5 ) * ( 0.8 + 0.4 * valueNoise( ( x0 + x ) * 0.3, ( y0 + y ) * 0.3, b.seed | 0 ) );
+				const f = Math.min( 0.9, b.strength * m );
+				const i = ( y0 + y ) * W + x0 + x;
+				for ( let k = 0; k < K; k++ ) {
+					let s = 0;
+					let wsum = 0;
+					for ( let dy = -1; dy <= 1; dy++ ) {
+						for ( let dx = -1; dx <= 1; dx++ ) {
+							const xx = x + dx;
+							const yy = y + dy;
+							if ( xx < 0 || yy < 0 || xx >= bw || yy >= bh || ! open( xx, yy ) ) {
+								continue;
+							}
+							const wgt = ( 2 - Math.abs( dx ) ) * ( 2 - Math.abs( dy ) );
+							s += v[ ( k * bh + yy ) * bw + xx ] * wgt;
+							wsum += wgt;
+						}
+					}
+					const was = v[ ( k * bh + y ) * bw + x ];
+					const now = was + ( s / wsum - was ) * f;
+					// What floats stays afloat; the rest settles as deposit.
+					this.g[ k ][ i ] = Math.min( this.g[ k ][ i ], now );
+					this.d[ k ][ i ] = now - this.g[ k ][ i ];
+					if ( this.g[ k ][ i ] > 0 ) {
+						bits |= 1 << k;
+					}
+				}
+				this.h[ i ] = Math.min( 1.6, this.h[ i ] + 0.12 * m * ( b.wet ?? 1 ) );
+			}
+		}
+		this._touch( x0, y0, x1, y1, bits, true );
+		return 0;
 	}
 
 	_touch( x0, y0, x1, y1, bits, wet ) {

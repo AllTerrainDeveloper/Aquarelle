@@ -829,7 +829,9 @@ export class SplashGenerator {
 				// `wet`: how damp the brush is (1 = usual; Endless lifts barely damp).
 				// With a `path` (x, y, r per point) it is drawn along a line instead
 				// (a thirsty brush lifting a strand or a highlight out of dark paint).
-				const lift = { x, y, r, path: op.path, strength: op.strength ?? 0.5, wet: op.wet ?? 1, seed: rng.u32() };
+				// `scrub`: worked over an overworked patch, evening the paint out
+				// instead of taking it up (see PigmentModel.scrub).
+				const lift = { x, y, r, path: op.path, strength: op.strength ?? 0.5, wet: op.wet ?? 1, scrub: !! op.scrub, seed: rng.u32() };
 				if ( ! this.animator ) {
 					model.lift( lift );
 					return true;

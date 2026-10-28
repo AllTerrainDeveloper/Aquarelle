@@ -371,6 +371,12 @@ const OFF_HUE = 0.045;
 const OFF_EDGE = 0.08;
 // Missing local variation (spread of lightness) that counts as "too flat".
 const OFF_FLAT = 0.02;
+// ...or busier (overworked) by this much.
+const OFF_BUSY = 0.02;
+// A scrub: how hard the damp brush works the paint, and how far that is
+// expected to even it out (the planner's prediction, a little cautious).
+const SCRUB_STRENGTH = 0.6;
+const SCRUB_MIX = 0.45;
 // The most water a correction carries (a nearly dry brush: it stays where
 // it is put, with no bloom or rim of its own).
 const REFINE_WATER = 0.06;
@@ -548,7 +554,7 @@ function refineArea( ctx, state, { target, dens, inArea, rng } ) {
 	// treated: clear water along it and lifting it were both tried, and on
 	// paintings both did worse than leaving it, as water on dried paint
 	// mostly makes backruns.)
-	const KINDS = [ 'light', 'dark', 'hue', 'soft', 'flat' ];
+	const KINDS = [ 'light', 'dark', 'hue', 'soft', 'flat', 'busy' ];
 	const masks = Object.fromEntries( KINDS.map( ( k ) => [ k, new Uint8Array( N ) ] ) );
 	for ( let ly = 0; ly < lh; ly++ ) {
 		for ( let lx = 0; lx < lw; lx++ ) {
@@ -571,8 +577,14 @@ function refineArea( ctx, state, { target, dens, inArea, rng } ) {
 			if ( gr > gc + OFF_EDGE && gr > 0.12 ) {
 				masks.soft[ i ] = 1;
 			}
-			if ( spread( Lr, lx, ly ) > spread( Lc, lx, ly ) + OFF_FLAT ) {
+			// Too even (the image has texture the painting lacks), or
+			// overworked (flecks and pinholes where the image is smooth).
+			const sr = spread( Lr, lx, ly );
+			const sc = spread( Lc, lx, ly );
+			if ( sr > sc + OFF_FLAT ) {
 				masks.flat[ i ] = 1;
+			} else if ( sc > sr + OFF_BUSY ) {
+				masks.busy[ i ] = 1;
 			}
 		}
 	}
@@ -583,7 +595,7 @@ function refineArea( ctx, state, { target, dens, inArea, rng } ) {
 	const piece = Math.max( 4, Math.round( B * PIECE ) );
 	const problems = [];
 	for ( const kind of KINDS ) {
-		const least = { flat: 12, soft: 6 }[ kind ] || 3;
+		const least = { flat: 12, busy: 12, soft: 6 }[ kind ] || 3;
 		for ( const comp of components( masks[ kind ], W, H, least ) ) {
 			const box = boxOf( comp, W );
 			let parts = [ comp ];
@@ -916,6 +928,32 @@ function refineArea( ctx, state, { target, dens, inArea, rng } ) {
 					}
 					out.push( { tool: 'lift-line', secs: timeOf( strokes ), fx: lift( cov, 0.5 ), ops: ( t ) => liftLineOps( strokes, t ) } );
 				}
+			}
+		}
+		// Scrub: an overworked patch (flecks of colour, pinholes of paper)
+		// worked over with a damp brush, the paint evened out where it is
+		// rather than more put on top of it.
+		if ( area >= 12 && ( 'busy' === p.kind || 'light' === p.kind || 'dark' === p.kind || 'hue' === p.kind ) ) {
+			const region = grow( cells, 1 );
+			const w = Math.max( 1.5, Math.min( B * 0.02, Math.sqrt( region.length ) * 0.3 ) );
+			const strokes = sweepStrokes( region, W, w, seam, { H, edgeNear: ctx.edgeNear, rng } ).filter( ( st ) => ! st.edge );
+			if ( strokes.length ) {
+				const cov = new Set();
+				for ( const st of strokes ) {
+					for ( const i of under( st.pts ) ) {
+						cov.add( i );
+					}
+				}
+				out.push( {
+					tool: 'scrub',
+					secs: strokes.reduce( ( a, st ) => a + strokeSecs( B, st, w ), 0 ),
+					fx: soften( cov, SCRUB_MIX ),
+					ops: ( t ) => strokes.map( ( st ) => {
+						const op = { type: 'lift', scrub: true, x: st.x, y: st.y, r: w, path: st.pts, strength: SCRUB_STRENGTH, seed: rng.u32(), chaos: 0.1, t };
+						t += strokeSecs( B, st, w );
+						return op;
+					} ),
+				} );
 			}
 		}
 		return out;

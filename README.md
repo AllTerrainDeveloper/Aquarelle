@@ -15,7 +15,8 @@ python3 -m http.server 8765
 ```
 
 **Controls:** pick a sample or drop an image; settings (image type,
-colours, detail) apply as soon as they change. Choose how to paint with the
+detail) apply as soon as they change. There is no colour count to set: the
+palette takes the paints the picture needs (up to 8; see *The palette*). Choose how to paint with the
 tabs, then press **Paint** (it also pauses and resumes):
 
 - **Quick**: the whole painting time-lapsed (its planned duration plays in
@@ -121,7 +122,9 @@ The live similarity score is shown throughout.
 
 Each round first **diagnoses** the sheet cell by cell, comparing the paint
 as it is with the image: too light, too dark, the wrong hue, an edge the
-painting lost (too soft), or variation it lacks (too flat). Then, for each
+painting lost (too soft), variation it lacks (too flat), or variation it
+should not have (overworked: flecks and pinholes where the image is
+smooth). Then, for each
 problem patch it **tries every tool** that could fix it in a
 prediction of what the paint would look like afterwards: strokes of the
 colour the patch needs (a dot for a speck), a glaze (one thin wet wash
@@ -129,7 +132,15 @@ over the patch in one colour), wet-in-wet (clear water, then its colours
 charged in to blend softly), a fine re-cut along a lost edge, and lifts.
 A thin patch that is too dark (a strand in the hair, a highlight along a
 branch) can also be **lifted as a line**: a clean, thirsty brush drawn
-along its spine, rather than a row of blots. Each round looks for smaller
+along its spine, rather than a row of blots. An overworked patch (or one
+too light, too dark or off in hue) can be **scrubbed**: a damp brush worked
+over it loosens the paint and evens it out where it is, each pigment drawn
+towards its mix just around, so flecks merge into their surroundings and
+pinholes of paper fill in; nothing is added or taken away, and masked paper
+is left alone. On the six samples in Quick it raised the average similarity
+from 90.3 to 91.9 (every sample gained), mostly in structure: the many
+small touches of refinement had left a fine speckle that only more touches
+could answer. Each round looks for smaller
 differences than the last (the thresholds are divided by a strictness that
 grows every eight rounds), so refining keeps finding work until the
 painting is close, instead of stopping once nothing is off by a
@@ -182,8 +193,9 @@ quarter, half and full strength) or mixed from two (closer still), is left
 off, and so is one of nearly a chosen paint's hue and no darker (it is that
 paint watered down; a darker one replaces it as the tube colour), and its slot goes to the next colour the picture needs; a paint a
 later choice makes redundant is taken off again. So a picture with seven
-shades of one blue gets one blue, and the palette is often shorter than
-the colours allowed. Shapes still follow the picture's own colours, so the
+shades of one blue gets one blue, and most pictures need 3 to 7 paints
+(at most 8 are taken: past that, on the samples, more paints only made the
+paintings worse). Shapes still follow the picture's own colours, so the
 light and the dark of one paint stay separate areas. Each area may mix two
 paints (a photo's, up to three), and **the brush mixes them on the
 palette**: a stroke whose cells call for a second paint carries both, in

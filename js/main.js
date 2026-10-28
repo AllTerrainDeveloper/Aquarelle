@@ -104,6 +104,10 @@ const fmt = ( s ) => {
 const setStatus = ( t ) => ( $( 'status' ).textContent = t );
 const srcSize = ( s ) => [ s.naturalWidth || s.width, s.naturalHeight || s.height ];
 
+// The palette takes the paints a picture needs (see watercolourPalette), up
+// to this many: past it, on the samples, more paints only made the
+// paintings worse (each slot went to a paint the others nearly make).
+const MAX_PAINTS = 8;
 // How much a photograph is simplified into painterly shapes at Balanced (1:
 // as much as at Soft); finer Detail simplifies less, Maximum not at all.
 const SIMPLIFY_BALANCED = 0.6;
@@ -312,7 +316,7 @@ async function analyze() {
 	const refW = Math.max( W, Math.round( sw * rs ) );
 	const refH = Math.max( H, Math.round( sh * rs ) );
 	const refPixels = grab( refW, refH );
-	const K = Number( $( 'pigments' ).value );
+	const K = MAX_PAINTS;
 	const seed = Number( $( 'seed' ).value ) >>> 0;
 	const minutes = Math.min( 30, Math.max( 1, Number( $( 'duration' ).value ) || 10 ) );
 	const duration = minutes * 60;
@@ -478,15 +482,6 @@ const reanalyze = () => {
 	clearTimeout( reanalyzeTimer );
 	reanalyzeTimer = setTimeout( () => session && analyze(), 150 );
 };
-$( 'pigments' ).addEventListener( 'input', ( e ) => {
-	$( 'pigOut' ).textContent = e.target.value;
-} );
-$( 'pigments' ).addEventListener( 'change', () => {
-	// A different palette size gives different colours: start with all allowed.
-	excluded.clear();
-	remap.clear();
-	reanalyze();
-} );
 $( 'duration' ).addEventListener( 'input', ( e ) => {
 	$( 'durOut' ).textContent = e.target.value + ' min';
 } );
