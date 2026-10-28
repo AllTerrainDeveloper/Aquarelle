@@ -24,15 +24,18 @@
  */
 
 import { Rng } from './prng.js';
-import { depthInside, packDiscs, sweepStrokes, spineStrokes, orientedSweepStrokes, strokeAngle, softEdgeStrokes } from './composition-planner.js';
+import { depthInside, packDiscs, packDiscsIn, sweepStrokes, spineStrokes, orientedSweepStrokes, strokeAngle, softEdgeStrokes } from './composition-planner.js';
 import { minFilter, maxFilter, boxBlur, gaussBlur } from './image-analyzer.js';
 import { linearToOklab, PAPER_LINEAR } from './color.js';
+import { colourLevels } from './colour-levels.js';
 
 export const LAYERS = [
 	{ id: 'wash', name: 'First wash: light and loose', t0: 0.0, t1: 0.24 },
 	{ id: 'mid', name: 'Mid-tones, shape by shape', t0: 0.27, t1: 0.55 },
 	{ id: 'glaze', name: 'Shadow glazes', t0: 0.58, t1: 0.75 },
-	{ id: 'detail', name: 'Darks & details', t0: 0.77, t1: 0.88 },
+	// The masking fluid comes off before the details (the shapes it kept
+	// white are tinted first thing in that layer).
+	{ id: 'detail', name: 'Darks & details', t0: 0.77, t1: 0.88, unmask: true },
 	{ id: 'finish', name: 'Finish: filling what was missed', t0: 0.89, t1: 0.97 },
 ];
 
@@ -44,44 +47,39 @@ const V_MID = 1.0;
  * Shared, image-only context computed once (worker side).
  */
 export function layerContext( an, { duration, seed, fineDetail = { strokes: 1, fine: 1 } } ) {
-	const { W, H, B, pigments, T, edge } = an;
+	// Shapes under masking fluid until the details (2) are planned over like
+	// the paper around them: the painter washes straight across the mask,
+	// which keeps the paint off (the paint model knows where it is). Only
+	// what is masked for good (1) is painted around.
+	const masked = an.reserve;
+	an = { ...an, reserve: masked.map( ( v ) => ( 1 === v ? 1 : 0 ) ) };
+	const { W, H, B, pigments, edge } = an;
 	const N = W * H;
 	const K = pigments.length;
 	const meanA = pigments.map( ( p ) => ( p.A[ 0 ] + p.A[ 1 ] + p.A[ 2 ] ) / 3 );
-	// What the big passes (first wash, mid-tones, glazes) paint: the picture
-	// without its fine detail. Each colour's small holes are closed (a
-	// building block without its windows, a sky without its thin branches)
-	// and its small specks removed; whatever that leaves empty takes the
-	// colour of its nearest neighbours, so no white is left behind. The
-	// details are painted on top at the end, as a painter does.
-	const rd = Math.max( 1, Math.round( B / 130 ) );
-	// Holes are filled only inside a solid area of the colour (a block
-	// around its windows), not in a lace of thin lines (a canopy of twigs,
-	// where the sky between them must stay sky).
-	const big = T[ 0 ].map( ( m, k ) => {
-		if ( pigments[ k ].isPaper ) {
-			return m;
-		}
-		const closed = minFilter( maxFilter( m, W, H, rd ), W, H, rd );
-		const local = boxBlur( m, W, H, rd * 2 );
-		const out = new Float32Array( N );
+	// What the big passes paint, coarse to fine (see ColourLevels): the
+	// first wash uses only the palette's most prominent third, each colour
+	// in big areas; the mid-tones two thirds in smaller areas; the glazes
+	// the whole palette, still without small patches (a distant building is
+	// one grey block, its windows come with the details). Only the details
+	// and the finish aim at the full picture, every colour and every speck.
+	const keepArea = ( B * 0.025 ) ** 2;
+	const { levels } = colourLevels( an, [
+		{ share: 1 / 3, minArea: ( B * 0.07 ) ** 2, minDepth: B * 0.02, keepArea, sigma: B * 0.04 },
+		{ share: 2 / 3, minArea: ( B * 0.045 ) ** 2, minDepth: B * 0.012, keepArea, sigma: B * 0.025 },
+		{ share: 1, minArea: ( B * 0.03 ) ** 2, minDepth: B * 0.01, keepArea, sigma: B * 0.012 },
+	] );
+	const big = levels.map( ( l ) => l.maps );
+	// Target darkness per cell (all pigments) of each big pass.
+	const D = big.map( ( maps ) => {
+		const d = new Float32Array( N );
 		for ( let i = 0; i < N; i++ ) {
-			const cov = closed[ i ] > 1e-4 ? local[ i ] / closed[ i ] : 0;
-			const s = Math.min( 1, Math.max( 0, ( cov - 0.5 ) / 0.3 ) );
-			out[ i ] = m[ i ] + Math.max( 0, closed[ i ] - m[ i ] ) * s;
+			for ( let k = 0; k < K; k++ ) {
+				d[ i ] += maps[ k ][ i ] * meanA[ k ];
+			}
 		}
-		return maxFilter( minFilter( out, W, H, rd ), W, H, rd );
+		return d;
 	} );
-	fillFromNearest( big, T[ 0 ], an.reserve, pigments, W, H, Math.max( 8, 4 * rd ) );
-	// Target darkness per cell (all pigments) of the big passes.
-	const D = new Float32Array( N );
-	for ( let i = 0; i < N; i++ ) {
-		let d = 0;
-		for ( let k = 0; k < K; k++ ) {
-			d += big[ k ][ i ] * meanA[ k ];
-		}
-		D[ i ] = d;
-	}
 	// Where the image has a real edge within reach (cut-in happens only there).
 	const strongOff = new Uint8Array( N );
 	for ( let i = 0; i < N; i++ ) {
@@ -93,9 +91,6 @@ export function layerContext( an, { duration, seed, fineDetail = { strokes: 1, f
 	for ( let i = 0; i < N; i++ ) {
 		edgeNear[ i ] = far[ i ] <= er ? 1 : 0;
 	}
-	// Shadow masses: the full target opened at a modest scale (no fine detail).
-	const rs = Math.max( 2, Math.round( B / 90 ) );
-	const shadow = T[ 0 ].map( ( m, k ) => ( pigments[ k ].isPaper ? m : maxFilter( minFilter( m, W, H, rs ), W, H, rs ) ) );
 	// Lightness gradients (smoothed) for each shape's stroke direction.
 	const Ls = new Float32Array( N );
 	for ( let i = 0; i < N; i++ ) {
@@ -111,19 +106,20 @@ export function layerContext( an, { duration, seed, fineDetail = { strokes: 1, f
 			gy[ i ] = Lb[ i + W ] - Lb[ i - W ];
 		}
 	}
-	return { an, W, H, B, N, K, meanA, D, big, edgeNear, shadow, duration, seed, fineDetail, gx, gy };
+	return { an, masked, W, H, B, N, K, meanA, D, big, colours: levels.map( ( l ) => l.allowed ), edgeNear, duration, seed, fineDetail, gx, gy };
 }
 
 /** The value target of a layer, per pigment (K arrays) and as density. */
 function layerTarget( ctx, layer ) {
-	const { an, N, K, meanA, D, shadow, big } = ctx;
+	const { an, N, K, meanA } = ctx;
 	const T0 = an.T[ 0 ];
 	const target = new Float32Array( K * N );
 	for ( let k = 0; k < K; k++ ) {
 		const off = k * N;
 		// The big passes paint the picture without its fine detail; the
 		// details and the finish aim at the full picture.
-		const t0 = layer <= 2 ? big[ k ] : T0[ k ];
+		const t0 = layer <= 2 ? ctx.big[ layer ][ k ] : T0[ k ];
+		const D = layer <= 2 ? ctx.D[ layer ] : null;
 		for ( let i = 0; i < N; i++ ) {
 			let v;
 			if ( 0 === layer ) {
@@ -131,9 +127,10 @@ function layerTarget( ctx, layer ) {
 			} else if ( 1 === layer ) {
 				v = t0[ i ] * Math.min( 1, V_MID / Math.max( 1e-3, D[ i ] ) );
 			} else if ( 2 === layer ) {
-				// A photo's darks are big areas (foliage, silhouettes): its glazes
-				// take them to full depth; the detail brush only handles small things.
-				v = an.photo ? t0[ i ] : Math.max( shadow[ k ][ i ], t0[ i ] * Math.min( 1, V_MID / Math.max( 1e-3, D[ i ] ) ) );
+				// The glazes take the big areas (without their fine detail) to full
+				// depth: a head of dark hair is finished here, before the detail
+				// brush starts on small things.
+				v = t0[ i ];
 			} else {
 				v = t0[ i ];
 			}
@@ -146,9 +143,93 @@ function layerTarget( ctx, layer ) {
 		for ( let k = 0; k < K; k++ ) {
 			d += target[ k * N + i ] * meanA[ k ];
 		}
-		dens[ i ] = d * 1.04 + 0.02;
+		// The layer's value and no further (watercolour cannot be taken back).
+		dens[ i ] = d + 0.005;
 	}
 	return { target, dens };
+}
+
+/** A shape the mask kept white is tinted if it needs at least this much paint. */
+const REVEAL_MIN = 0.01;
+/** ...and it comes before every other detail (shapes are taken by mass). */
+const REVEALED = 1e6;
+
+/** Share of the details layer's time the edge re-cut may take. */
+const EDGE_BUDGET = 0.25;
+
+/**
+ * Edge re-cut: the painter sharpens the silhouettes at the end. The broad
+ * washes leave a soft, rounded rim where the image has a crisp edge (a
+ * rooftop, a building's side against the sky): there the paper is still
+ * lighter than the image just inside the dark side of the edge. That rim
+ * (the dark side of a strong step in value, within a couple of cells of
+ * it) is traced with the fine tip in the colour it needs, as one stroke
+ * along the edge, so the corner comes back square.
+ *
+ * @return {Object[]} shapes { k, strokes, secs, mass, x, y } for the details pass
+ */
+function edgeRecut( ctx, { target, dens, room, need, reserve, budget } ) {
+	const { an, W, H, B, N, K } = ctx;
+	const { pigments, importance } = an;
+	// How far from the edge the rim reaches (cells), and how big a step in
+	// value counts as a crisp edge.
+	const reach = Math.max( 1, Math.round( B / 160 ) );
+	const lightNear = minFilter( dens, W, H, reach );
+	const rim = new Uint8Array( N );
+	for ( let i = 0; i < N; i++ ) {
+		const step = dens[ i ] - lightNear[ i ];
+		const have = dens[ i ] - room( i );
+		if ( ! reserve[ i ] && step > 0.25 && step > 0.35 * dens[ i ] && have < dens[ i ] * 0.85 ) {
+			rim[ i ] = 1;
+		}
+	}
+	const out = [];
+	for ( const cells of components( rim, W, H, Math.max( 4, reach * 3 ) ) ) {
+		const sums = new Float64Array( K );
+		let imp = 0;
+		for ( const i of cells ) {
+			imp += importance[ i ];
+			for ( let k = 0; k < K; k++ ) {
+				if ( ! pigments[ k ].isPaper ) {
+					sums[ k ] += need( k, i );
+				}
+			}
+		}
+		let k1 = 0;
+		for ( let k = 1; k < K; k++ ) {
+			if ( sums[ k ] > sums[ k1 ] ) {
+				k1 = k;
+			}
+		}
+		if ( sums[ k1 ] / cells.length < 0.05 ) {
+			continue;
+		}
+		const strokes = spineStrokes( cells, W, { maxStrokes: 6 } ).filter( ( st ) => st.len >= reach * 2 );
+		if ( ! strokes.length ) {
+			continue;
+		}
+		let secs = 0;
+		for ( const st of strokes ) {
+			// A fine tip: never wider than the rim.
+			for ( let q = 2; q < st.pts.length; q += 3 ) {
+				st.pts[ q ] = Math.min( st.pts[ q ], reach * 0.9 + 0.4 );
+			}
+			st.r = Math.min( st.r, reach * 0.9 + 0.4 );
+			secs += strokeSecs( B, st, st.r );
+		}
+		out.push( { k: k1, strokes, secs, mass: ( imp / cells.length ) * sums[ k1 ], ...centroid( cells, W ) } );
+	}
+	// The most visible edges first, within the time.
+	out.sort( ( a, b ) => b.mass - a.mass );
+	const keep = [];
+	let used = 0;
+	for ( const e of out ) {
+		if ( used + e.secs <= budget ) {
+			used += e.secs;
+			keep.push( e );
+		}
+	}
+	return keep;
 }
 
 /**
@@ -163,62 +244,6 @@ function closeMask( mask, W, H, r, reserve ) {
 		out[ i ] = c[ i ] > 0.5 && ! reserve[ i ] ? 1 : 0;
 	}
 	return out;
-}
-
-/**
- * Cells where the detail-free map lost what the picture has there (a thin
- * dark branch removed, nothing filled in) take the average colour of their
- * nearest kept neighbours, growing in from all sides.
- */
-function fillFromNearest( big, full, reserve, pigments, W, H, maxSteps ) {
-	const N = W * H;
-	const K = big.length;
-	const dens = ( maps, i ) => {
-		let d = 0;
-		for ( let k = 0; k < K; k++ ) {
-			if ( ! pigments[ k ].isPaper ) {
-				d += maps[ k ][ i ] * ( pigments[ k ].A[ 0 ] + pigments[ k ].A[ 1 ] + pigments[ k ].A[ 2 ] );
-			}
-		}
-		return d;
-	};
-	let pending = new Uint8Array( N );
-	let left = 0;
-	for ( let i = 0; i < N; i++ ) {
-		const df = dens( full, i );
-		if ( ! reserve[ i ] && df > 0.3 && dens( big, i ) < 0.3 * df ) {
-			pending[ i ] = 1;
-			left++;
-		}
-	}
-	const acc = new Float32Array( K );
-	for ( let step = 0; step < maxSteps && left > 0; step++ ) {
-		const next = pending.slice();
-		for ( let i = 0; i < N; i++ ) {
-			if ( ! pending[ i ] ) {
-				continue;
-			}
-			const x = i % W;
-			acc.fill( 0 );
-			let n = 0;
-			for ( const j of [ x > 0 ? i - 1 : -1, x < W - 1 ? i + 1 : -1, i - W, i + W ] ) {
-				if ( j >= 0 && j < N && ! pending[ j ] && ! reserve[ j ] ) {
-					for ( let k = 0; k < K; k++ ) {
-						acc[ k ] += big[ k ][ j ];
-					}
-					n++;
-				}
-			}
-			if ( n ) {
-				for ( let k = 0; k < K; k++ ) {
-					big[ k ][ i ] = acc[ k ] / n;
-				}
-				next[ i ] = 0;
-				left--;
-			}
-		}
-		pending = next;
-	}
 }
 
 /** How deep the deepest cell of a shape lies (distance to its border). */
@@ -332,6 +357,735 @@ function colourChain( ks, pigments, loaded ) {
 		cur = best;
 	}
 	return out;
+}
+
+/* Refinement: diagnose, then the best tool for each problem ---------------- */
+
+// How far (OKLab) the painting may be off before a cell has a problem, in
+// the first rounds (later, stricter rounds look for smaller differences:
+// these over the round's strictness).
+const OFF_L = 0.035;
+const OFF_HUE = 0.045;
+// A difference in edge strength (lightness change per cell) that counts
+// (well above the paper's grain and a wash's own backruns).
+const OFF_EDGE = 0.08;
+// Missing local variation (spread of lightness) that counts as "too flat".
+const OFF_FLAT = 0.02;
+// ...or busier (overworked) by this much.
+const OFF_BUSY = 0.02;
+// A scrub: how hard the damp brush works the paint, and how far that is
+// expected to even it out (the planner's prediction, a little cautious).
+const SCRUB_STRENGTH = 0.6;
+const SCRUB_MIX = 0.45;
+// The most water a correction carries (a nearly dry brush: it stays where
+// it is put, with no bloom or rim of its own).
+const REFINE_WATER = 0.06;
+// Seconds a wet tool really costs beyond the hand's time: the paper round
+// it stays wet, and strokes beside it wait for it to dry.
+const WET_WAIT = 2.5;
+// Seconds a wet-in-wet charge takes the hand.
+const WET_SECS = 1.6;
+// A refinement round: the most hand time it may use (seconds), and how many
+// of the worst problems it weighs fixes for.
+const ROUND_SECS = 60;
+const ROUND_PROBLEMS = 400;
+// The widest a problem patch is fixed in one go (share of the sheet).
+const PIECE = 0.1;
+// The evaluator's colour difference the eye forgives, and how wide (share
+// of the sheet) its error map is smoothed to tell where the painting looks
+// wrong.
+const SEEN_OK = 3.5;
+const SEEN_BLUR = 0.02;
+// How sure a tool's track record starts: as if it had delivered what it
+// promised on this many typical fixes.
+const TRUST_PRIOR = 3;
+// How much each round's measurement counts against the older ones.
+const TRUST_KEEP = 0.8;
+
+/**
+ * An Endless (or similarity goal) refinement round. It looks at the painting
+ * as it is against the image, cell by cell over the whole sheet (or the
+ * round's area), and finds what is wrong where: too light, too dark, the
+ * wrong hue, an edge the painting lost (too soft), or variation the painting
+ * lacks (too flat). For each of the worst problem patches, every tool that
+ * could fix it is tried in a prediction (a stroke or wash of the colour it
+ * needs, a glaze, wet-in-wet, a fine re-cut, lifts). The fixes are then made
+ * best first by what they gain for their time, wherever they are, until the
+ * round's time is used: a glaring patch beside good paper is not averaged
+ * away, and where a fix pays off decides where the painter goes. Each
+ * fix updates the prediction, so the next is judged on the paper as it will
+ * be. The next round measures what each fix really did: tools that promise
+ * more than they deliver on this painting are trusted less, and a spot a
+ * fix did nothing for counts less.
+ *
+ * @return {{ ops: Object[], target: Float32Array, dens: Float32Array, tools: Object }}
+ */
+function refineArea( ctx, state, { target, dens, inArea, rng } ) {
+	const { an, W, H, B, N, K, meanA } = ctx;
+	const { pigments, importance, reserve } = an;
+	const T0 = an.T[ 0 ];
+	const ref = an.lab;
+	const rg = state.region;
+	const work = state.cur.slice();
+	const look = predictor( ctx );
+	// Each cell's distance from the image with the paint in `work`, worked
+	// out once and kept until a fix changes the cell (see commit).
+	const seen = new Float32Array( N ).fill( -1 );
+	const distNow = ( i ) => ( seen[ i ] >= 0 ? seen[ i ] : ( seen[ i ] = look.dist( work, i ) ) );
+	// How much a cell's colour counts: where it shows (importance), and far
+	// more where the painting visibly looks wrong around it (the evaluator's
+	// error map, smoothed a little: a patch, not a speck), so that fixing a
+	// glaring patch beside good paper beats polishing what is nearly right.
+	const wt = new Float32Array( N );
+	{
+		let vis = null;
+		if ( state.de ) {
+			const { EW, EH } = state;
+			const ex = gaussBlur( Float32Array.from( state.de, ( v ) => Math.max( 0, v - SEEN_OK ) ** 2 ), EW, EH, SEEN_BLUR * Math.max( EW, EH ) );
+			let mean = 0;
+			for ( const v of ex ) {
+				mean += v / ex.length;
+			}
+			vis = ( i ) => ex[ Math.min( EH - 1, ( ( i / W ) | 0 ) >> 1 ) * EW + Math.min( EW - 1, ( i % W ) >> 1 ) ] / Math.max( 1e-6, mean );
+		}
+		for ( let i = 0; i < N; i++ ) {
+			wt[ i ] = ( 0.5 + importance[ i ] ) * ( vis ? 1 + vis( i ) : 1 );
+		}
+	}
+	const shown = ( cells ) => {
+		let d = 0;
+		for ( const i of cells ) {
+			d += distNow( i ) * wt[ i ];
+		}
+		return d;
+	};
+	// What the last round's fixes really did, measured on the paper as it is
+	// now against what each promised: a tool's track record (the tool that
+	// keeps delivering less than it promises is trusted less), and the cells
+	// where a fix did next to nothing (tried again, they count less).
+	if ( state.fresh || ! ctx.refined ) {
+		ctx.refined = { trust: {}, stuck: new Uint8Array( N ), last: [] };
+	}
+	const rec = ctx.refined;
+	for ( const t of Object.values( rec.trust ) ) {
+		t.got *= TRUST_KEEP;
+		t.promised *= TRUST_KEEP;
+		t.n *= TRUST_KEEP;
+	}
+	for ( const f of rec.last ) {
+		// With the weights it was judged by.
+		let now = 0;
+		f.cells.forEach( ( i, j ) => ( now += distNow( i ) * f.wts[ j ] ) );
+		const got = f.before - now;
+		if ( got < 0.3 * f.gain ) {
+			for ( const i of f.cells ) {
+				rec.stuck[ i ] = Math.min( 3, rec.stuck[ i ] + 1 );
+			}
+		}
+		// Fixes that overlapped another of their round are not told apart.
+		if ( ! f.shared ) {
+			const t = ( rec.trust[ f.tool ] ??= { got: 0, promised: 0, n: 0 } );
+			t.got += got;
+			t.promised += f.gain;
+			t.n++;
+		}
+	}
+	rec.last = [];
+	const trust = ( tool ) => {
+		const t = rec.trust[ tool ];
+		if ( ! t || t.n < 0.5 ) {
+			return 1;
+		}
+		const prior = ( TRUST_PRIOR * t.promised ) / t.n;
+		return Math.max( 0.1, Math.min( 1.5, ( t.got + prior ) / ( t.promised + prior ) ) );
+	};
+	// The area, with a margin for edges and blurs.
+	const m = 3;
+	const x0 = Math.max( 0, rg.x0 - m );
+	const y0 = Math.max( 0, rg.y0 - m );
+	const x1 = Math.min( W - 1, rg.x1 + m );
+	const y1 = Math.min( H - 1, rg.y1 + m );
+	const lw = x1 - x0 + 1;
+	const lh = y1 - y0 + 1;
+	const gi = ( lx, ly ) => ( y0 + ly ) * W + x0 + lx;
+	// Each round stricter than the last (see OFF_L).
+	const strict = 1 + 0.3 * ( state.round || 0 );
+	// The painting's colour now, and the image's, over the box.
+	const cur = new Float32Array( lw * lh * 3 );
+	for ( let ly = 0; ly < lh; ly++ ) {
+		for ( let lx = 0; lx < lw; lx++ ) {
+			look.colour( work, gi( lx, ly ), cur, ( ly * lw + lx ) * 3 );
+		}
+	}
+	const Lr = ( lx, ly ) => ref[ gi( lx, ly ) * 3 ];
+	const Lc = ( lx, ly ) => cur[ ( ly * lw + lx ) * 3 ];
+	// Edge strength (largest lightness step to a neighbour) and local spread.
+	const grad = ( L, lx, ly ) => {
+		const c = L( lx, ly );
+		let g = 0;
+		for ( const [ dx, dy ] of [ [ 1, 0 ], [ -1, 0 ], [ 0, 1 ], [ 0, -1 ] ] ) {
+			const xx = lx + dx;
+			const yy = ly + dy;
+			if ( xx >= 0 && yy >= 0 && xx < lw && yy < lh ) {
+				g = Math.max( g, Math.abs( L( xx, yy ) - c ) );
+			}
+		}
+		return g;
+	};
+	const spread = ( L, lx, ly ) => {
+		let s1 = 0;
+		let s2 = 0;
+		let n = 0;
+		for ( let dy = -2; dy <= 2; dy++ ) {
+			for ( let dx = -2; dx <= 2; dx++ ) {
+				const xx = lx + dx;
+				const yy = ly + dy;
+				if ( xx >= 0 && yy >= 0 && xx < lw && yy < lh ) {
+					const v = L( xx, yy );
+					s1 += v;
+					s2 += v * v;
+					n++;
+				}
+			}
+		}
+		return Math.sqrt( Math.max( 0, s2 / n - ( s1 / n ) ** 2 ) );
+	};
+	// (An edge the painting has and the image does not, "too hard", is not
+	// treated: clear water along it and lifting it were both tried, and on
+	// paintings both did worse than leaving it, as water on dried paint
+	// mostly makes backruns.)
+	const KINDS = [ 'light', 'dark', 'hue', 'soft', 'flat', 'busy' ];
+	const masks = Object.fromEntries( KINDS.map( ( k ) => [ k, new Uint8Array( N ) ] ) );
+	for ( let ly = 0; ly < lh; ly++ ) {
+		for ( let lx = 0; lx < lw; lx++ ) {
+			const i = gi( lx, ly );
+			if ( reserve[ i ] || ! inArea( i ) ) {
+				continue;
+			}
+			const o = ( ly * lw + lx ) * 3;
+			const dL = cur[ o ] - ref[ i * 3 ];
+			const dab = Math.hypot( cur[ o + 1 ] - ref[ i * 3 + 1 ], cur[ o + 2 ] - ref[ i * 3 + 2 ] );
+			if ( dL > OFF_L / strict ) {
+				masks.light[ i ] = 1;
+			} else if ( dL < -OFF_L / strict ) {
+				masks.dark[ i ] = 1;
+			} else if ( dab > OFF_HUE / strict ) {
+				masks.hue[ i ] = 1;
+			}
+			const gc = grad( Lc, lx, ly );
+			const gr = grad( Lr, lx, ly );
+			if ( gr > gc + OFF_EDGE && gr > 0.12 ) {
+				masks.soft[ i ] = 1;
+			}
+			// Too even (the image has texture the painting lacks), or
+			// overworked (flecks and pinholes where the image is smooth).
+			const sr = spread( Lr, lx, ly );
+			const sc = spread( Lc, lx, ly );
+			if ( sr > sc + OFF_FLAT ) {
+				masks.flat[ i ] = 1;
+			} else if ( sc > sr + OFF_BUSY ) {
+				masks.busy[ i ] = 1;
+			}
+		}
+	}
+	// Problem patches, worst first (how far off they are, where it shows).
+	// A patch wider than PIECE of the sheet comes in tile-sized pieces, each
+	// its own problem: one fix never sweeps half the sheet (a whole field
+	// glazed for a few wrong flowers), and each piece is weighed on its own.
+	const piece = Math.max( 4, Math.round( B * PIECE ) );
+	const problems = [];
+	for ( const kind of KINDS ) {
+		const least = { flat: 12, busy: 12, soft: 6 }[ kind ] || 3;
+		for ( const comp of components( masks[ kind ], W, H, least ) ) {
+			const box = boxOf( comp, W );
+			let parts = [ comp ];
+			if ( box.x1 - box.x0 >= piece || box.y1 - box.y0 >= piece ) {
+				const tiles = new Map();
+				for ( const i of comp ) {
+					const key = Math.floor( ( i % W ) / piece ) * 1e5 + Math.floor( ( i / W ) / piece );
+					let t = tiles.get( key );
+					if ( ! t ) {
+						tiles.set( key, ( t = [] ) );
+					}
+					t.push( i );
+				}
+				parts = [ ...tiles.values() ].filter( ( t ) => t.length >= least );
+			}
+			for ( const cells of parts ) {
+				let bad = 0;
+				for ( const i of cells ) {
+					bad += distNow( i ) * wt[ i ];
+				}
+				problems.push( { kind, cells, bad, ...centroid( cells, W ) } );
+			}
+		}
+	}
+	problems.sort( ( a, b ) => b.bad - a.bad );
+	// What each pigment still needs at a cell (refinement's raised target).
+	const need = ( k, i ) => Math.max( 0, target[ k * N + i ] - work[ k * N + i ] );
+	const room = ( i ) => {
+		let have = 0;
+		for ( let k = 0; k < K; k++ ) {
+			have += work[ k * N + i ] * meanA[ k ];
+		}
+		return Math.max( 0, dens[ i ] - have );
+	};
+	// The colours a patch needs most, most first.
+	const wanted = ( cells, n ) => {
+		const sums = new Float64Array( K );
+		for ( const i of cells ) {
+			for ( let k = 0; k < K; k++ ) {
+				if ( ! pigments[ k ].isPaper ) {
+					sums[ k ] += need( k, i ) * meanA[ k ];
+				}
+			}
+		}
+		return [ ...sums.keys() ].filter( ( k ) => sums[ k ] > 0.001 * cells.length ).sort( ( a, b ) => sums[ b ] - sums[ a ] ).slice( 0, n );
+	};
+	const seam = Math.max( 2, B * 0.012 );
+	// The cells within r (a square) of a patch, in sheet order. Worked out
+	// over the patch's bounding box only (with running sums), not the whole
+	// sheet: it is asked for every candidate fix of every problem.
+	const grow = ( cells, r ) => {
+		let x0 = W;
+		let y0 = H;
+		let x1 = -1;
+		let y1 = -1;
+		for ( const i of cells ) {
+			const x = i % W;
+			const y = ( i / W ) | 0;
+			x0 = Math.min( x0, x );
+			x1 = Math.max( x1, x );
+			y0 = Math.min( y0, y );
+			y1 = Math.max( y1, y );
+		}
+		if ( x1 < 0 ) {
+			return [];
+		}
+		const bx = Math.max( 0, x0 - r );
+		const by = Math.max( 0, y0 - r );
+		const bw = Math.min( W - 1, x1 + r ) - bx + 1;
+		const bh = Math.min( H - 1, y1 + r ) - by + 1;
+		const mk = new Uint8Array( bw * bh );
+		for ( const i of cells ) {
+			mk[ ( ( ( i / W ) | 0 ) - by ) * bw + ( i % W ) - bx ] = 1;
+		}
+		const sum = new Int32Array( Math.max( bw, bh ) + 1 );
+		const rows = new Uint8Array( bw * bh );
+		for ( let y = 0; y < bh; y++ ) {
+			for ( let x = 0; x < bw; x++ ) {
+				sum[ x + 1 ] = sum[ x ] + mk[ y * bw + x ];
+			}
+			for ( let x = 0; x < bw; x++ ) {
+				rows[ y * bw + x ] = sum[ Math.min( bw, x + r + 1 ) ] > sum[ Math.max( 0, x - r ) ] ? 1 : 0;
+			}
+		}
+		const near = new Uint8Array( bw * bh );
+		for ( let x = 0; x < bw; x++ ) {
+			for ( let y = 0; y < bh; y++ ) {
+				sum[ y + 1 ] = sum[ y ] + rows[ y * bw + x ];
+			}
+			for ( let y = 0; y < bh; y++ ) {
+				near[ y * bw + x ] = sum[ Math.min( bh, y + r + 1 ) ] > sum[ Math.max( 0, y - r ) ] ? 1 : 0;
+			}
+		}
+		const out = [];
+		for ( let y = 0; y < bh; y++ ) {
+			for ( let x = 0; x < bw; x++ ) {
+				const i = ( by + y ) * W + bx + x;
+				if ( near[ y * bw + x ] && ! reserve[ i ] ) {
+					out.push( i );
+				}
+			}
+		}
+		return out;
+	};
+	// The strokes a thirsty brush lifts a thin patch with, and their ops.
+	const liftLines = ( cells ) => spineStrokes( cells, W ).filter( ( st ) => st.len >= LINE_MIN );
+	const liftLineOps = ( strokes, t ) => strokes.map( ( st ) => {
+		const op = liftLine( st, t, rng );
+		t += strokeSecs( B, st, st.r );
+		return op;
+	} );
+	// Cells under a path (its own tip radius at each point, plus `extra`).
+	const under = ( pts, extra = 0 ) => {
+		const out = new Set();
+		for ( let q = 0; q < pts.length; q += 3 ) {
+			const r = Math.max( 0.7, pts[ q + 2 ] + extra );
+			const x = pts[ q ];
+			const y = pts[ q + 1 ];
+			for ( let yy = Math.max( 0, Math.floor( y - r ) ); yy <= Math.min( H - 1, Math.ceil( y + r ) ); yy++ ) {
+				for ( let xx = Math.max( 0, Math.floor( x - r ) ); xx <= Math.min( W - 1, Math.ceil( x + r ) ); xx++ ) {
+					if ( ( xx - x ) ** 2 + ( yy - y ) ** 2 <= r * r ) {
+						out.add( yy * W + xx );
+					}
+				}
+			}
+		}
+		return out;
+	};
+	// Effects, each as new pigment amounts for some cells (from `work`).
+	const lay = ( cells, ks, amount ) => {
+		const out = new Map();
+		for ( const i of cells ) {
+			let left = room( i );
+			const vals = new Float32Array( K );
+			for ( let k = 0; k < K; k++ ) {
+				vals[ k ] = work[ k * N + i ];
+			}
+			for ( const k of ks ) {
+				const add = Math.min( need( k, i ) * amount, left / Math.max( 0.05, meanA[ k ] ) );
+				vals[ k ] += add;
+				left -= add * meanA[ k ];
+			}
+			out.set( i, vals );
+		}
+		return out;
+	};
+	const lift = ( cells, strength ) => {
+		const out = new Map();
+		for ( const i of cells ) {
+			const vals = new Float32Array( K );
+			for ( let k = 0; k < K; k++ ) {
+				const v = work[ k * N + i ];
+				vals[ k ] = v > T0[ k ][ i ] ? v - strength * ( v - T0[ k ][ i ] ) : v;
+			}
+			out.set( i, vals );
+		}
+		return out;
+	};
+	// Clear water: the paint under it runs together (a small blur), a little
+	// of what is too much comes up with the water.
+	const soften = ( cells, mix ) => {
+		const out = new Map();
+		for ( const i of cells ) {
+			const x = i % W;
+			const y = ( i / W ) | 0;
+			const vals = new Float32Array( K );
+			let wsum = 0;
+			for ( let dy = -1; dy <= 1; dy++ ) {
+				for ( let dx = -1; dx <= 1; dx++ ) {
+					const xx = x + dx;
+					const yy = y + dy;
+					if ( xx < 0 || yy < 0 || xx >= W || yy >= H || reserve[ yy * W + xx ] ) {
+						continue;
+					}
+					const wgt = ( 2 - Math.abs( dx ) ) * ( 2 - Math.abs( dy ) );
+					const j = yy * W + xx;
+					for ( let k = 0; k < K; k++ ) {
+						vals[ k ] += work[ k * N + j ] * wgt;
+					}
+					wsum += wgt;
+				}
+			}
+			for ( let k = 0; k < K; k++ ) {
+				vals[ k ] = work[ k * N + i ] * ( 1 - mix ) + ( vals[ k ] / wsum ) * mix;
+			}
+			out.set( i, vals );
+		}
+		return out;
+	};
+	// Gain of an effect: how much closer the cells come (weighted where it shows).
+	const gainOf = ( fx ) => {
+		let g = 0;
+		for ( const [ i, vals ] of fx ) {
+			g += ( distNow( i ) - look.distOf( vals, i ) ) * wt[ i ];
+		}
+		return g;
+	};
+	const commit = ( fx ) => {
+		for ( const [ i, vals ] of fx ) {
+			for ( let k = 0; k < K; k++ ) {
+				work[ k * N + i ] = vals[ k ];
+			}
+			seen[ i ] = -1;
+		}
+	};
+	// Candidate tools for a problem: { tool, ops: (t) => ops, secs, fx }.
+	const candidates = ( p ) => {
+		const out = [];
+		const { cells } = p;
+		const area = cells.length;
+		const ks = wanted( cells, 3 );
+		const depth = deepestIn( cells, W );
+		const strokesFor = ( c, w ) => ( depth < B * 0.012 || area < ( B * 0.02 ) ** 2 ? spineStrokes( c, W ) : orientedSweepStrokes( c, W, w, seam, { H, edgeNear: ctx.edgeNear, rng }, 0 ) );
+		const timeOf = ( strokes ) => strokes.reduce( ( a, st ) => a + strokeSecs( B, st, st.r ), 0 );
+		if ( 'light' === p.kind || 'hue' === p.kind || 'flat' === p.kind || 'soft' === p.kind ) {
+			// Paint: strokes of the colour it needs most (a dot for a speck).
+			for ( const k of ks.slice( 0, 2 ) ) {
+				if ( area <= 6 ) {
+					const r = Math.sqrt( area / Math.PI ) + 0.6;
+					out.push( { tool: 'dot', secs: DAB_SECS, fx: lay( under( [ p.x, p.y, r ] ), [ k ], 0.95 ), ops: ( t ) => [ dab( k, { x: p.x, y: p.y, r }, t, pigments, rng ) ] } );
+					continue;
+				}
+				const w = Math.max( 1, Math.min( B * 0.02, depth * 0.8 ) );
+				const strokes = strokesFor( cells, w );
+				if ( ! strokes.length ) {
+					continue;
+				}
+				const cov = new Set();
+				for ( const st of strokes ) {
+					for ( const i of under( st.pts ) ) {
+						cov.add( i );
+					}
+				}
+				const thin = depth < B * 0.012 || area < ( B * 0.02 ) ** 2;
+				out.push( {
+					tool: 'soft' === p.kind ? 're-cut' : 'stroke',
+					secs: timeOf( strokes ),
+					fx: lay( cov, [ k ], 0.95 ),
+					ops: ( t ) => strokes.map( ( st ) => {
+						const op = thin ? spine( k, st, t, 0.95, 0.15, rng ) : sweep( k, st, w, t, 2e6 + p.x * 1e3 + p.y, 1, 0.15, B, rng );
+						t += strokeSecs( B, st, thin ? st.r : w );
+						return op;
+					} ),
+				} );
+			}
+			// Glaze: one thin, wet wash over the patch and a little round it,
+			// in one colour, evening out its hue and value.
+			if ( area >= 12 ) {
+				const region = grow( cells, 2 );
+				const w = Math.max( 2, Math.min( B * 0.03, Math.sqrt( region.length ) * 0.35 ) );
+				const strokes = sweepStrokes( region, W, w, seam, { H, edgeNear: ctx.edgeNear, rng } ).filter( ( st ) => ! st.edge );
+				if ( strokes.length ) {
+					for ( const k of ks ) {
+						out.push( {
+							tool: 'glaze',
+							secs: timeOf( strokes ),
+							fx: lay( region, [ k ], 0.6 ),
+							ops: ( t ) => strokes.map( ( st ) => {
+								const op = sweep( k, st, w, t, 2.5e6 + p.x * 1e3 + p.y, 0.6, 0.45, B, rng );
+								t += strokeSecs( B, st, w );
+								op.wetTool = true;
+								return op;
+							} ),
+						} );
+					}
+				}
+			}
+			// Wet-in-wet: wet the patch with clear water, charge its colours
+			// in; they spread and blend softly (a gradient, a soft variation).
+			if ( area >= ( B * 0.025 ) ** 2 && ks.length ) {
+				const r = Math.min( B * 0.06, Math.sqrt( area / Math.PI ) );
+				const disc = under( [ p.x, p.y, r * 1.1 ] );
+				const k2 = ks[ 1 ] ?? -1;
+				out.push( {
+					tool: 'wet-in-wet',
+					wet: true,
+					secs: WET_SECS + WET_WAIT,
+					fx: ( () => {
+						const fx = soften( disc, 0.5 );
+						const saved = new Map();
+						for ( const [ i, vals ] of fx ) {
+							saved.set( i, Float32Array.from( { length: K }, ( _, k ) => work[ k * N + i ] ) );
+							for ( let k = 0; k < K; k++ ) {
+								work[ k * N + i ] = vals[ k ];
+							}
+						}
+						const charged = lay( disc, k2 >= 0 ? [ ks[ 0 ], k2 ] : [ ks[ 0 ] ], 0.55 );
+						for ( const [ i, vals ] of saved ) {
+							for ( let k = 0; k < K; k++ ) {
+								work[ k * N + i ] = vals[ k ];
+							}
+						}
+						return charged;
+					} )(),
+					ops: ( t ) => [ { type: 'wetblend', k: ks[ 0 ], k2, x: p.x, y: p.y, r, level: 0, chaos: 0.15, seed: rng.u32(), wetTool: true, t } ],
+				} );
+			}
+		}
+		if ( 'dark' === p.kind || 'hue' === p.kind ) {
+			// Lifts: a damp brush blots the patch (discs packed into it).
+			const discs = area <= 8 ? [ { x: p.x, y: p.y, fit: Math.sqrt( area / Math.PI ) + 0.8 } ] : packDiscsIn( cells, W, H, B, { maxR: B * 0.02, minR: 1, jitter: 0.2, seam: 1, rng, limit: 16 } );
+			if ( discs.length ) {
+				const cov = new Set();
+				for ( const d of discs ) {
+					for ( const i of under( [ d.x, d.y, d.fit ] ) ) {
+						cov.add( i );
+					}
+				}
+				out.push( {
+					tool: 'lift',
+					secs: discs.reduce( ( a, d ) => a + liftSecs( B, d.fit ), 0 ),
+					fx: lift( cov, 0.5 ),
+					ops: ( t ) => discs.map( ( d ) => {
+						const op = { type: 'lift', x: d.x, y: d.y, r: d.fit, strength: 0.8, seed: rng.u32(), chaos: 0.1, t };
+						t += liftSecs( B, d.fit );
+						return op;
+					} ),
+				} );
+			}
+			// A line too dark (a strand in the hair, a highlight along a branch):
+			// a thirsty brush drawn along it, not a row of blots.
+			if ( area > 8 && depth <= LINE_DEPTH ) {
+				const strokes = liftLines( cells );
+				if ( strokes.length ) {
+					const cov = new Set();
+					for ( const st of strokes ) {
+						for ( const i of under( st.pts ) ) {
+							cov.add( i );
+						}
+					}
+					out.push( { tool: 'lift-line', secs: timeOf( strokes ), fx: lift( cov, 0.5 ), ops: ( t ) => liftLineOps( strokes, t ) } );
+				}
+			}
+		}
+		// Scrub: an overworked patch (flecks of colour, pinholes of paper)
+		// worked over with a damp brush, the paint evened out where it is
+		// rather than more put on top of it.
+		if ( area >= 12 && ( 'busy' === p.kind || 'light' === p.kind || 'dark' === p.kind || 'hue' === p.kind ) ) {
+			const region = grow( cells, 1 );
+			const w = Math.max( 1.5, Math.min( B * 0.02, Math.sqrt( region.length ) * 0.3 ) );
+			const strokes = sweepStrokes( region, W, w, seam, { H, edgeNear: ctx.edgeNear, rng } ).filter( ( st ) => ! st.edge );
+			if ( strokes.length ) {
+				const cov = new Set();
+				for ( const st of strokes ) {
+					for ( const i of under( st.pts ) ) {
+						cov.add( i );
+					}
+				}
+				out.push( {
+					tool: 'scrub',
+					secs: strokes.reduce( ( a, st ) => a + strokeSecs( B, st, w ), 0 ),
+					fx: soften( cov, SCRUB_MIX ),
+					ops: ( t ) => strokes.map( ( st ) => {
+						const op = { type: 'lift', scrub: true, x: st.x, y: st.y, r: w, path: st.pts, strength: SCRUB_STRENGTH, seed: rng.u32(), chaos: 0.1, t };
+						t += strokeSecs( B, st, w );
+						return op;
+					} ),
+				} );
+			}
+		}
+		return out;
+	};
+	// Every problem's best fix, ranked across the whole sheet by what it is
+	// expected to gain for its time: the prediction, scaled by the tool's
+	// track record, and by half for each time a fix already did nothing
+	// there. The best fix is taken, the paper as predicted updated, and any
+	// fix it changed the cells of weighed again before it is taken (a lazy
+	// queue). (Wet fixes need no spacing here: the painter waits for wet
+	// paper beside a stroke before painting next to it.)
+	const best = ( p ) => {
+		const before = shown( p.cells );
+		let stuck = 0;
+		for ( const i of p.cells ) {
+			stuck += rec.stuck[ i ] / p.cells.length;
+		}
+		let pick = null;
+		let bestScore = 0;
+		let gain = 0;
+		for ( const c of candidates( p ) ) {
+			const g = gainOf( c.fx );
+			// A little more time is worth it only for a little more gain.
+			const score = ( g * trust( c.tool ) * 0.5 ** stuck ) / ( 1 + 0.05 * c.secs );
+			// Water's effect is the least certain: it must promise more.
+			if ( g > ( c.wet ? 0.08 : 0.02 ) * before && score > bestScore ) {
+				bestScore = score;
+				pick = c;
+				gain = g;
+			}
+		}
+		return pick ? { p, c: pick, score: bestScore, gain, at: commits } : null;
+	};
+	const ops = [];
+	const tools = {};
+	let t = 0.3;
+	let spent = 0;
+	let commits = 0;
+	const stamp = new Int32Array( N );
+	const owner = new Int32Array( N ).fill( -1 );
+	const taken = [];
+	const queue = problems.slice( 0, ROUND_PROBLEMS ).map( best ).filter( Boolean );
+	while ( queue.length && spent < ROUND_SECS ) {
+		let top = 0;
+		for ( let q = 1; q < queue.length; q++ ) {
+			if ( queue[ q ].score > queue[ top ].score ) {
+				top = q;
+			}
+		}
+		const e = queue[ top ];
+		queue[ top ] = queue[ queue.length - 1 ];
+		queue.pop();
+		const cells = [ ...e.c.fx.keys() ];
+		if ( cells.some( ( i ) => stamp[ i ] > e.at ) ) {
+			const again = best( e.p );
+			if ( again ) {
+				queue.push( again );
+			}
+			continue;
+		}
+		if ( spent + e.c.secs > ROUND_SECS ) {
+			continue;
+		}
+		const fix = { tool: e.c.tool, cells, wts: Float32Array.from( cells, ( i ) => wt[ i ] ), before: shown( cells ), gain: e.gain, shared: false };
+		for ( const i of cells ) {
+			if ( owner[ i ] >= 0 ) {
+				fix.shared = true;
+				taken[ owner[ i ] ].shared = true;
+			}
+		}
+		commit( e.c.fx );
+		commits++;
+		for ( const i of cells ) {
+			stamp[ i ] = commits;
+			owner[ i ] = taken.length;
+		}
+		taken.push( fix );
+		ops.push( ...e.c.ops( t ) );
+		t += e.c.secs + 0.2;
+		spent += e.c.secs;
+		tools[ e.c.tool ] = ( tools[ e.c.tool ] || 0 ) + 1;
+	}
+	rec.last = taken;
+	// Corrections are made almost dry (they stay where they are put), except
+	// the tools whose point is the water: glazes and wet-in-wet.
+	for ( const op of ops ) {
+		if ( 'lift' === op.type ) {
+			op.wet = 0.2;
+		} else if ( ! op.wetTool && undefined !== op.water ) {
+			op.water = Math.min( op.water, REFINE_WATER );
+		}
+	}
+	ops.sort( ( a, b ) => a.t - b.t );
+	return { ops, target, dens, tools };
+}
+
+/**
+ * Colour prediction from pigment amounts: the colour of a cell (OKLab) and
+ * its distance from the image, for the paint in `work` or given amounts.
+ */
+function predictor( ctx ) {
+	const { an, N, K } = ctx;
+	const { pigments } = an;
+	const ref = an.lab;
+	const tmp = [ 0, 0, 0 ];
+	const colourOf = ( get, out, o ) => {
+		let o0 = 0;
+		let o1 = 0;
+		let o2 = 0;
+		for ( let k = 0; k < K; k++ ) {
+			const v = get( k );
+			if ( v > 0 ) {
+				const A = pigments[ k ].A;
+				o0 += v * A[ 0 ];
+				o1 += v * A[ 1 ];
+				o2 += v * A[ 2 ];
+			}
+		}
+		linearToOklab( PAPER_LINEAR[ 0 ] * Math.exp( -o0 ), PAPER_LINEAR[ 1 ] * Math.exp( -o1 ), PAPER_LINEAR[ 2 ] * Math.exp( -o2 ), out, o );
+	};
+	const off = ( i ) => Math.hypot( tmp[ 0 ] - ref[ i * 3 ], tmp[ 1 ] - ref[ i * 3 + 1 ], tmp[ 2 ] - ref[ i * 3 + 2 ] );
+	return {
+		colour: ( work, i, out, o ) => colourOf( ( k ) => work[ k * N + i ], out, o ),
+		dist: ( work, i ) => {
+			colourOf( ( k ) => work[ k * N + i ], tmp, 0 );
+			return off( i );
+		},
+		distOf: ( vals, i ) => {
+			colourOf( ( k ) => vals[ k ], tmp, 0 );
+			return off( i );
+		},
+	};
 }
 
 /**
@@ -511,6 +1265,15 @@ const liftSecs = ( B, r ) => {
 };
 // A dab with the brush tip.
 const DAB_SECS = 0.08;
+// A too-dark patch no deeper than this (cells) is a line, lifted along its
+// spine; its strokes at least this long (cells).
+const LINE_DEPTH = 2;
+const LINE_MIN = 3;
+
+/** A thirsty brush drawn along a stroke, lifting the paint over the target. */
+function liftLine( st, t, rng ) {
+	return { type: 'lift', x: st.x, y: st.y, r: st.r, path: st.pts, strength: 0.8, seed: rng.u32(), chaos: 0.1, t };
+}
 const brushSpeed = ( B, w ) => Math.max( B * 0.35, w * 14 );
 // Real hand time: the stroke itself plus lifting, moving and landing again.
 const strokeSecs = ( B, st, w ) => 0.6 + st.len / brushSpeed( B, w );
@@ -537,12 +1300,14 @@ export function planLayer( ctx, layer, state ) {
 	// smaller differences count as work still to do.
 	const round = state.round || 0;
 	const strict = 1 + 0.3 * round;
-	// A refinement round may work on one area only (cells x0..x1, y0..y1).
+	// A refinement round may work on one area only (cells x0..x1, y0..y1),
+	// and leaves the cells marked `off` alone (Cinematic's border).
 	const rg = state.region;
+	const off = state.off;
 	const inArea = rg ? ( i ) => {
 		const x = i % W;
 		const y = ( i / W ) | 0;
-		return x >= rg.x0 && x <= rg.x1 && y >= rg.y0 && y <= rg.y1;
+		return x >= rg.x0 && x <= rg.x1 && y >= rg.y0 && y <= rg.y1 && ! off?.[ i ];
 	} : () => true;
 	const { target, dens } = layerTarget( ctx, layer );
 	// Endless refinement is driven by how the painting actually compares
@@ -585,6 +1350,10 @@ export function planLayer( ctx, layer, state ) {
 				darker[ i ] = 1;
 			}
 		}
+	}
+	// Endless rounds (and the similarity goal): diagnose, then the best tool.
+	if ( state.signed && rg ) {
+		return refineArea( ctx, state, { target, dens, inArea, rng } );
 	}
 	const cur = state.cur;
 	// What each pigment still needs here for this layer.
@@ -957,13 +1726,23 @@ export function planLayer( ctx, layer, state ) {
 		}
 		const lights = [];
 		for ( const cells of components( over, W, H, 2 ) ) {
+			// A line (a strand, a highlight along a branch): lifted with a thirsty
+			// brush drawn along it.
+			if ( cells.length > 8 && deepestIn( cells, W ) <= LINE_DEPTH ) {
+				let imp = 0;
+				let ex = 0;
+				for ( const i of cells ) {
+					imp += importance[ i ];
+					ex -= room( i );
+				}
+				for ( const st of spineStrokes( cells, W ).filter( ( q ) => q.len >= LINE_MIN ) ) {
+					lights.push( { cells, x: st.x, y: st.y, r: st.r, line: st, secs: strokeSecs( B, st, st.r ), mass: ( imp / cells.length ) * Math.min( 2, ex / cells.length ) * Math.sqrt( st.len ) } );
+				}
+				continue;
+			}
 			if ( cells.length > ( B * 0.05 ) ** 2 ) {
 				// A bigger patch: blot it in several small lifts.
-				const pm = new Uint8Array( N );
-				for ( const i of cells ) {
-					pm[ i ] = 1;
-				}
-				for ( const d of packDiscs( pm, depthInside( pm, W, H, B ), new Uint8Array( N ), { W, H, maxR: B * 0.02, minR: 1, jitter: 0.2, seam: 1, rng, limit: 24 } ) ) {
+				for ( const d of packDiscsIn( cells, W, H, B, { maxR: B * 0.02, minR: 1, jitter: 0.2, seam: 1, rng, limit: 24 } ) ) {
 					const ii = Math.round( d.y ) * W + Math.round( d.x );
 					lights.push( { cells: [ ii ], x: d.x, y: d.y, r: d.fit, mass: importance[ ii ] * Math.min( 2, -room( ii ) ) * d.fit } );
 				}
@@ -975,6 +1754,12 @@ export function planLayer( ctx, layer, state ) {
 				imp += importance[ i ];
 				ex -= room( i );
 			}
+			// A speck a little too dark is left alone (lifting hundreds of them
+			// reads as dots over unfinished areas); only a real light patch, or
+			// a small one that matters (a catch-light in an eye), is lifted.
+			if ( cells.length < ( B * 0.01 ) ** 2 && ( imp / cells.length < 0.6 || ex / cells.length < 0.4 ) ) {
+				continue;
+			}
 			const c = centroid( cells, W );
 			lights.push( { cells, ...c, r: Math.min( B * 0.03, Math.sqrt( cells.length / Math.PI ) + 0.8 ), mass: ( imp / cells.length ) * Math.min( 2, ex / cells.length ) * Math.sqrt( cells.length ) } );
 		}
@@ -984,7 +1769,7 @@ export function planLayer( ctx, layer, state ) {
 		const pick = [];
 		let liftEnd = 0;
 		for ( const l of lights ) {
-			const secs = liftSecs( B, l.r );
+			const secs = l.secs ?? liftSecs( B, l.r );
 			if ( liftEnd + secs <= liftBudget ) {
 				liftEnd += secs;
 				pick.push( l );
@@ -995,8 +1780,8 @@ export function planLayer( ctx, layer, state ) {
 			for ( const i of l.cells ) {
 				lifted[ i ] = 1;
 			}
-			ops.push( { type: 'lift', x: l.x, y: l.y, r: l.r, strength: 0.8, seed: rng.u32(), chaos: 0.1, t: lt } );
-			lt += liftSecs( B, l.r );
+			ops.push( l.line ? liftLine( l.line, lt, rng ) : { type: 'lift', x: l.x, y: l.y, r: l.r, strength: 0.8, seed: rng.u32(), chaos: 0.1, t: lt } );
+			lt += l.secs ?? liftSecs( B, l.r );
 			hx = l.x;
 			hy = l.y;
 		}
@@ -1139,6 +1924,44 @@ export function planLayer( ctx, layer, state ) {
 				}
 			}
 		}
+		// The masking fluid has just come off (see LAYERS): every shape it kept
+		// white is tinted in the colour it needs, however pale (a lit window's
+		// yellow, a strand's light brown), before the other details; one meant
+		// to stay white is left as it is. A speck gets a touch of the tip, a
+		// line strokes along its spine.
+		if ( L.unmask && ! state.signed ) {
+			const m = new Uint8Array( N );
+			for ( let i = 0; i < N; i++ ) {
+				m[ i ] = 2 === ctx.masked[ i ] && inArea( i ) ? 1 : 0;
+			}
+			for ( const cells of components( m, W, H, 1 ) ) {
+				const sums = new Float64Array( K );
+				for ( const i of cells ) {
+					for ( let k = 0; k < K; k++ ) {
+						if ( ! pigments[ k ].isPaper ) {
+							sums[ k ] += need( k, i );
+						}
+					}
+				}
+				let k1 = 0;
+				for ( let k = 1; k < K; k++ ) {
+					if ( sums[ k ] > sums[ k1 ] ) {
+						k1 = k;
+					}
+				}
+				const avgNeed = sums[ k1 ] / cells.length;
+				if ( avgNeed < REVEAL_MIN ) {
+					continue;
+				}
+				const c = centroid( cells, W );
+				const strokes = cells.length > 8 ? spineStrokes( cells, W ) : [];
+				if ( strokes.length ) {
+					shapes.push( { k: k1, strokes, secs: strokes.reduce( ( a, st ) => a + strokeSecs( B, st, st.r ), 0 ), mass: REVEALED + avgNeed, box: boxOf( cells, W ), ...c } );
+				} else {
+					shapes.push( { k: k1, dab: true, r: Math.sqrt( cells.length / Math.PI ) + 0.6, strokes: [], secs: DAB_SECS, mass: REVEALED + avgNeed, ...c } );
+				}
+			}
+		}
 		shapes.sort( ( a, b ) => b.mass - a.mass );
 		const chosen = [];
 		let used = 0;
@@ -1149,32 +1972,44 @@ export function planLayer( ctx, layer, state ) {
 				chosen.push( s );
 			}
 		}
-		// Keep to the brush: the colour already loaded first, then always the
-		// closest colour. Within each colour big to small, as a painter does:
-		// trunk and main branches, then smaller branches, twigs, leaves and
-		// dabs last; nearest next within each size.
+		const edges = rg ? [] : edgeRecut( ctx, { target, dens, room, need, reserve, budget: budget * EDGE_BUDGET } );
+		// Big before small, as a painter does: first every colour's large
+		// shapes (what is left of a head of hair, a trunk and main branches),
+		// so no big area is still unfinished while fine work goes on; then
+		// the silhouettes are re-cut (see edgeRecut); then the smaller
+		// branches, twigs, leaves and dabs. Within each pass keep to the
+		// brush: the colour already loaded first, then always the closest
+		// colour, big to small and nearest next within each colour.
 		const size = ( sh ) => sh.strokes.reduce( ( acc, st ) => acc + st.len, 0 );
 		let t = 0.3 + liftEnd;
-		for ( const k of colourChain( chosen.map( ( sh ) => sh.k ), pigments, state.loaded ) ) {
-			const mine = chosen.filter( ( c ) => c.k === k );
-			const tiers = [
-				mine.filter( ( sh ) => size( sh ) >= B * 0.1 ),
-				mine.filter( ( sh ) => size( sh ) < B * 0.1 && size( sh ) >= B * 0.03 ),
-				mine.filter( ( sh ) => size( sh ) < B * 0.03 ),
-			];
-			for ( const tier of tiers ) {
-				for ( const sh of walk( tier, hx, hy ) ) {
-					if ( sh.dab ) {
-						ops.push( dab( k, sh, t, pigments, rng ) );
-						t += DAB_SECS;
+		let loaded = state.loaded;
+		const passes = [ chosen.filter( ( sh ) => size( sh ) >= B * 0.1 ), edges, chosen.filter( ( sh ) => size( sh ) < B * 0.1 ) ];
+		for ( const pass of passes ) {
+			const chain = colourChain( pass.map( ( sh ) => sh.k ), pigments, loaded );
+			for ( const k of chain ) {
+				const mine = pass.filter( ( c ) => c.k === k );
+				const tiers = [
+					mine.filter( ( sh ) => size( sh ) >= B * 0.1 ),
+					mine.filter( ( sh ) => size( sh ) < B * 0.1 && size( sh ) >= B * 0.03 ),
+					mine.filter( ( sh ) => size( sh ) < B * 0.03 ),
+				];
+				for ( const tier of tiers ) {
+					for ( const sh of walk( tier, hx, hy ) ) {
+						if ( sh.dab ) {
+							ops.push( dab( k, sh, t, pigments, rng ) );
+							t += DAB_SECS;
+						}
+						for ( const st of sh.strokes ) {
+							ops.push( spine( k, st, t, 0.95, 0.12, rng ) );
+							t += strokeSecs( B, st, st.r );
+						}
+						hx = sh.x;
+						hy = sh.y;
 					}
-					for ( const st of sh.strokes ) {
-						ops.push( spine( k, st, t, 0.95, 0.12, rng ) );
-						t += strokeSecs( B, st, st.r );
-					}
-					hx = sh.x;
-					hy = sh.y;
 				}
+			}
+			if ( chain.length ) {
+				loaded = chain[ chain.length - 1 ];
 			}
 		}
 	} else {
@@ -1341,18 +2176,6 @@ export function planLayer( ctx, layer, state ) {
 		const kept = keepImprovements( ops, ctx, cur, target, dens );
 		ops.length = 0;
 		ops.push( ...kept );
-	}
-	// Endless corrections are made almost dry: a small, near-dry brush and
-	// barely damp lifts, so they stay where they are put instead of
-	// spreading dirty water over what is already right.
-	if ( state.signed ) {
-		for ( const op of ops ) {
-			if ( 'lift' === op.type ) {
-				op.wet = 0.2;
-			} else if ( undefined !== op.water ) {
-				op.water = Math.min( op.water, 0.15 );
-			}
-		}
 	}
 	ops.sort( ( a, b ) => a.t - b.t );
 	return { ops, target, dens };

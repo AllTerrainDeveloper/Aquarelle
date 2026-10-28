@@ -30,17 +30,44 @@ uniform vec2 uSim;
 uniform vec2 uPaperScale;
 uniform vec3 uPaperColor;
 uniform float uGran;
+uniform float uGranFull;
 uniform float uWarp;
 uniform float uTexel;
 uniform int uView;
 uniform float uSheen;
 uniform vec4 uCam;
 uniform float uFine;
+// The sheet's look: paper relief lighting, fibres and uneven sizing, pigment
+// pooling at wash edges, mottling.
+uniform vec4 uLook;
+uniform int uSharp;
 in vec2 vUv;
 out vec4 outColor;
 
 vec4 dens( vec2 uv ) {
 	vec2 p = uv * uSim - 0.5;
+	if ( uSharp > 0 ) {
+		// Catmull-Rom between cells: as smooth as the blend below, but it keeps
+		// a cell's own value at its centre instead of averaging it away with
+		// its neighbours, so fine detail (a lit window, a strand) stays crisp.
+		vec2 i0 = floor( p );
+		vec2 f = p - i0;
+		vec2 w0 = f * ( -0.5 + f * ( 1.0 - 0.5 * f ) );
+		vec2 w1 = 1.0 + f * f * ( -2.5 + 1.5 * f );
+		vec2 w2 = f * ( 0.5 + f * ( 2.0 - 1.5 * f ) );
+		vec2 w3 = f * f * ( -0.5 + 0.5 * f );
+		ivec2 hi = ivec2( uSim ) - 1;
+		vec4 acc = vec4( 0.0 );
+		for ( int dy = 0; dy < 4; dy++ ) {
+			float wy = dy == 0 ? w0.y : dy == 1 ? w1.y : dy == 2 ? w2.y : w3.y;
+			for ( int dx = 0; dx < 4; dx++ ) {
+				float wx = dx == 0 ? w0.x : dx == 1 ? w1.x : dx == 2 ? w2.x : w3.x;
+				ivec2 c = clamp( ivec2( i0 ) + ivec2( dx - 1, dy - 1 ), ivec2( 0 ), hi );
+				acc += texelFetch( uDens, c, 0 ) * ( wx * wy );
+			}
+		}
+		return max( acc, 0.0 );
+	}
 	vec2 f = fract( p );
 	// Smooth (C1) blending between cells: no visible grid when seen up close.
 	// The GPU's own bilinear filter does the blend in one lookup, at the
@@ -74,21 +101,26 @@ void main() {
 	vec2 uv = sv + ( warpLo + warpHi * 0.9 ) / uSim;
 	vec4 d = dens( uv );
 	vec3 D = max( d.rgb, 0.0 );
-	// Pigment pooling along density fronts (subtle; the simulation does the rest).
+	// Pigment pooling along density fronts (subtle; the simulation does the rest):
+	// where a wash ends, a step large for the paint there, not the grain within
+	// a dark wash, which would darken the whole of it past what was laid.
 	vec2 e = 1.0 / uSim;
 	vec3 gx = dens( uv + vec2( e.x, 0.0 ) ).rgb - dens( uv - vec2( e.x, 0.0 ) ).rgb;
 	vec3 gy = dens( uv + vec2( 0.0, e.y ) ).rgb - dens( uv - vec2( 0.0, e.y ) ).rgb;
-	float front = length( abs( gx ) + abs( gy ) );
-	D *= 1.0 + 0.35 * smoothstep( 0.02, 0.35, front );
+	float front = length( abs( gx ) + abs( gy ) ) / ( dot( D, vec3( 0.3333 ) ) + 0.05 );
+	D *= 1.0 + uLook.z * smoothstep( 0.6, 1.4, front );
 	float w = d.a;
 	float dm = dot( D, vec3( 0.3333 ) );
-	// Granulation + mottling.
-	float g = 1.0 + uGran * ( 0.5 - ph ) * 2.0 * smoothstep( 0.02, 0.6, dm );
-	g *= 1.0 + 0.08 * ( pp.a - 0.5 ) * smoothstep( 0.0, 0.5, dm );
+	// Granulation + mottling. Pigment settles in the paper's valleys: plain in
+	// light and mid washes, but a heavy dark fills the valleys and the peaks
+	// alike, so past uGranFull its speckle stays the same in density (fades
+	// in proportion) instead of growing with the paint.
+	float g = 1.0 + uGran * ( 0.5 - ph ) * 2.0 * smoothstep( 0.02, 0.6, dm ) * min( 1.0, uGranFull / max( dm, 1e-3 ) );
+	g *= 1.0 + uLook.w * ( pp.a - 0.5 ) * smoothstep( 0.0, 0.5, dm );
 	// Cold-press sheet: uneven sizing, scattered fibres, warm off-white.
 	float sizing = texture( uPaper, sv * uPaperScale * 0.11 + 0.17 ).g - 0.5;
 	float fibre = smoothstep( 0.62, 0.8, texture( uPaper, puv * 2.3 + 0.41 ).a ) * smoothstep( 0.55, 0.75, texture( uPaper, puv * 0.9 ).b );
-	vec3 paper = uPaperColor * ( 1.0 + 0.035 * sizing ) - vec3( 0.025, 0.03, 0.04 ) * fibre;
+	vec3 paper = uPaperColor * ( 1.0 + uLook.y * ( 0.035 * sizing ) ) - uLook.y * vec3( 0.025, 0.03, 0.04 ) * fibre;
 	vec3 col = paper * exp( -D * g );
 	// Paper tooth lit from the upper left: highlights on the bumps, shade in the valleys.
 	float hx = texture( uPaper, puv + vec2( uTexel, 0.0 ) ).r - texture( uPaper, puv - vec2( uTexel, 0.0 ) ).r;
@@ -96,7 +128,7 @@ void main() {
 	float hx2 = texture( uPaper, puv * 0.5 + vec2( uTexel, 0.0 ) ).r - texture( uPaper, puv * 0.5 - vec2( uTexel, 0.0 ) ).r;
 	float hy2 = texture( uPaper, puv * 0.5 + vec2( 0.0, uTexel ) ).r - texture( uPaper, puv * 0.5 - vec2( 0.0, uTexel ) ).r;
 	float relief = 0.2 * ( hx + hy ) + 0.12 * ( hx2 + hy2 );
-	col *= 1.0 + relief + 0.06 * ( ph - 0.5 );
+	col *= 1.0 + uLook.x * ( relief + 0.06 * ( ph - 0.5 ) );
 	// Up close (Cinematic) the sheet shows a finer tooth too.
 	if ( uFine > 0.0 ) {
 		vec2 fuv = puv * 3.7 + 0.29;
@@ -122,6 +154,17 @@ void main() {
 	}
 	outColor = vec4( toSrgb( clamp( col, 0.0, 1.0 ) ), 1.0 );
 }`;
+
+/**
+ * The sheet's look: pigment settling in the paper's valleys (granulation,
+ * density ×(1 ± this), up to the mean density granulationFull, then the
+ * same in absolute terms), wash borders warped by the paper (cells), the
+ * paper's relief lighting and its fibres and uneven sizing (factors on
+ * their usual strength), pigment pooling where a wash ends (density ×(1 +
+ * this)) and mottling (×(1 ± this)), and whether cells are blended with
+ * Catmull-Rom (sharp) or a smoothed bilinear.
+ */
+export const LOOK = { granulation: 0.22, granulationFull: 0.5, warp: 0.6, relief: 1, paper: 1, pooling: 0.08, mottling: 0.06, sharp: true };
 
 function compile( gl, type, src ) {
 	const s = gl.createShader( type );
@@ -150,7 +193,7 @@ export class WatercolorRenderer {
 		}
 		this.prog = prog;
 		this.u = {};
-		for ( const name of [ 'uDens', 'uPaper', 'uErr', 'uSim', 'uPaperScale', 'uPaperColor', 'uGran', 'uWarp', 'uTexel', 'uView', 'uSheen', 'uCam', 'uFine' ] ) {
+		for ( const name of [ 'uDens', 'uPaper', 'uErr', 'uSim', 'uPaperScale', 'uPaperColor', 'uGran', 'uWarp', 'uTexel', 'uView', 'uSheen', 'uCam', 'uFine', 'uLook', 'uGranFull', 'uSharp' ] ) {
 			this.u[ name ] = gl.getUniformLocation( prog, name );
 		}
 		this.vao = gl.createVertexArray();
@@ -172,6 +215,8 @@ export class WatercolorRenderer {
 		this.cam = [ 0, 0, 1, 1 ];
 		// Extra fine paper grain when the camera is close (0–1).
 		this.fine = 0;
+		// The look of the sheet and the paint on it (see LOOK).
+		this.look = { ...LOOK };
 		this.needsDraw = true;
 		this.paperColor = [ 1, 1, 1 ];
 	}
@@ -348,8 +393,12 @@ export class WatercolorRenderer {
 		const B = Math.max( this.W, this.H );
 		gl.uniform2f( this.u.uPaperScale, ( 1.5 * this.W ) / B, ( 1.5 * this.H ) / B );
 		gl.uniform3fv( this.u.uPaperColor, this.paperColor );
-		gl.uniform1f( this.u.uGran, 0.22 );
-		gl.uniform1f( this.u.uWarp, 2.2 );
+		const L = this.look;
+		gl.uniform1f( this.u.uGran, L.granulation );
+		gl.uniform1f( this.u.uGranFull, L.granulationFull );
+		gl.uniform1i( this.u.uSharp, L.sharp ? 1 : 0 );
+		gl.uniform1f( this.u.uWarp, L.warp );
+		gl.uniform4f( this.u.uLook, L.relief, L.paper, L.pooling, L.mottling );
 		gl.uniform1f( this.u.uTexel, 1.2 / this.paperSize );
 		gl.uniform1i( this.u.uView, view );
 		gl.uniform1f( this.u.uSheen, this.sheen );

@@ -23,6 +23,9 @@ const CINE_APPROACH = 0.4;
 // from fine marks (size 0) to broad washes (size 1).
 const handSpeed = ( B, size ) => B * ( 0.08 + 0.22 * size );
 
+/** Water (h) above which paper counts as wet for a hard edge beside it. */
+const WET_BESIDE = 0.03;
+
 /**
  * Cinematic: the clean border a careful painter leaves around the sheet. Along
  * each edge the margin wanders (between about 1% and 3.5% of the sheet's long
@@ -47,6 +50,9 @@ export function makeBorder( W, H, seed ) {
 	const top = edge();
 	const bottom = edge();
 	return {
+		// The widest the border can get (a share of the long side): the brush
+		// lifts up to 1.25 times the margin from the edge, plus its tip.
+		reach: ( maxM * 1.3 ) / B,
 		room( x, y, scale = 1 ) {
 			return Math.min( x - left( y / H ) * scale, W - x - right( y / H ) * scale, y - top( x / W ) * scale, H - y - bottom( x / W ) * scale );
 		},
@@ -510,6 +516,38 @@ export class SplashGenerator {
 	 * A drop falls, lands and blooms outward; heavier drops throw a crown of
 	 * satellite droplets (particles) that bloom where they land.
 	 */
+	/**
+	 * A line lifted with a clean, thirsty brush: drawn along the path at the
+	 * pace of a fine stroke; the paint comes off as the brush leaves.
+	 */
+	_liftAlong( rng, op, lift ) {
+		const anim = this.animator;
+		const P = op.path;
+		const n = P.length / 3;
+		let total = 0;
+		const track = new Float32Array( n * 3 );
+		for ( let q = 0; q < n; q++ ) {
+			if ( q ) {
+				total += Math.hypot( P[ q * 3 ] - P[ q * 3 - 3 ], P[ q * 3 + 1 ] - P[ q * 3 - 2 ] );
+			}
+			track[ q * 3 ] = P[ q * 3 ];
+			track[ q * 3 + 1 ] = P[ q * 3 + 1 ];
+			track[ q * 3 + 2 ] = total;
+		}
+		for ( let q = 0; q < n; q++ ) {
+			track[ q * 3 + 2 ] = total > 0 ? track[ q * 3 + 2 ] / total : q / Math.max( 1, n - 1 );
+		}
+		const B = this.an.B;
+		const approach = anim.cinematic ? CINE_APPROACH : 0.12;
+		const start = anim.nextBrush( this.now, approach, -1, P[ 0 ], P[ 1 ] );
+		const dur = Math.min( 2.6, 0.25 + total / ( B * 0.3 ) );
+		anim.brushFreeAt = start + dur + approach;
+		anim.add( { tool: 'brush', mode: 'sweep', start, dur, approach, linger: approach, x: P[ 0 ], y: P[ 1 ], tip: Math.max( 0.8, op.r ?? 1 ), track, color: '#c9c0ae', lift } );
+		this.handX = P[ ( n - 1 ) * 3 ];
+		this.handY = P[ ( n - 1 ) * 3 + 1 ];
+		return true;
+	}
+
 	_drop( rng, op, x, y, r, k, { crown = 0, spray = 0, extra = {}, delay = 0, color, fit = Infinity } = {} ) {
 		if ( this.noSplashes ) {
 			// Drops and splashes off: the brush paints the same mark, a short
@@ -603,6 +641,36 @@ export class SplashGenerator {
 	}
 
 	/**
+	 * Where along a sweep's path the paper beside it is wet but not its
+	 * colour's (the sky still wet next to a building), if anywhere. Wet is
+	 * wet: even water whose pigment has settled lets new paint run into it.
+	 */
+	_wetBeside( op ) {
+		const { W, H, h } = this.model;
+		const pts = op.path;
+		let since = Infinity;
+		for ( let q = 0; q < pts.length; q += 3 ) {
+			const r = pts[ q + 2 ] + 2;
+			since += q ? Math.hypot( pts[ q ] - pts[ q - 3 ], pts[ q + 1 ] - pts[ q - 2 ] ) : 0;
+			if ( since < Math.max( 1, r * 0.5 ) ) {
+				continue;
+			}
+			since = 0;
+			const cx = pts[ q ];
+			const cy = pts[ q + 1 ];
+			const st = Math.max( 1, Math.floor( r / 4 ) );
+			for ( let y = Math.max( 0, Math.floor( cy - r ) ); y <= Math.min( H - 1, cy + r ); y += st ) {
+				for ( let x = Math.max( 0, Math.floor( cx - r ) ); x <= Math.min( W - 1, cx + r ); x += st ) {
+					if ( h[ y * W + x ] > WET_BESIDE && ! this.belongs( op.k, x, y ) ) {
+						return { x, y, r };
+					}
+				}
+			}
+		}
+		return null;
+	}
+
+	/**
 	 * Executes an op by scheduling its gestures. Returns false when the op
 	 * should be deferred (e.g. a dry-brush mark on a still-wet region).
 	 */
@@ -674,6 +742,17 @@ export class SplashGenerator {
 				return true;
 
 			case 'sweep':
+				// A wash with a hard edge waits until the paint of another colour
+				// beside it is dry (a painter lets the sky dry before cutting the
+				// buildings in against it), or the two bleed and every corner goes
+				// soft. The first wash is wet-in-wet on purpose.
+				if ( op.stage >= 1 && op.k >= 0 && ! op.force ) {
+					const wet = this._wetBeside( op );
+					if ( wet ) {
+						this.drying.helpDry( model, wet.x, wet.y, wet.r );
+						return false;
+					}
+				}
 				// One row-by-row pass of an object's wash, carried top to bottom.
 				this._brushAlong( rng, { ...op, trust: true, graded: true, shared: this._washMask( op.wash ) }, op.k );
 				return true;
@@ -748,12 +827,19 @@ export class SplashGenerator {
 			case 'lift': {
 				// A clean damp brush blots the spot; pigment comes off as it finishes.
 				// `wet`: how damp the brush is (1 = usual; Endless lifts barely damp).
-				const lift = { x, y, r, strength: op.strength ?? 0.5, wet: op.wet ?? 1, seed: rng.u32() };
+				// With a `path` (x, y, r per point) it is drawn along a line instead
+				// (a thirsty brush lifting a strand or a highlight out of dark paint).
+				// `scrub`: worked over an overworked patch, evening the paint out
+				// instead of taking it up (see PigmentModel.scrub).
+				const lift = { x, y, r, path: op.path, strength: op.strength ?? 0.5, wet: op.wet ?? 1, scrub: !! op.scrub, seed: rng.u32() };
 				if ( ! this.animator ) {
 					model.lift( lift );
 					return true;
 				}
 				const anim = this.animator;
+				if ( op.path ) {
+					return this._liftAlong( rng, op, lift );
+				}
 				// A tiny spot is a quick dab; a big blot takes its time.
 				const u = Math.min( 1, r / ( this.an.B * 0.02 ) );
 				// Cinematic: the brush is seen coming down onto the paper and lifting off.

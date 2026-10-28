@@ -29,6 +29,23 @@ const DRY = 0.004;
 const TS = 16;
 // Share of pigment carried by water that is wetting dry paper.
 const FRONT = 0.2;
+// A brush carries a second pigment when the cells it paints call for at
+// least this much of it (against its own pigment), on this share of them.
+const MIX_MIN = 0.15;
+const MIX_SHARE = 0.4;
+// Brush strokes never push a cell past its target darkness (by more than
+// this factor and pad): watercolour cannot be taken back, so paint builds up
+// to the value and no further; what is missing is added later.
+const DENS_OVER = 1.0;
+const DENS_PAD = 0.005;
+// Bristle streaks show in a brush stroke from this tip radius (cells), in
+// full from STREAK_FULL; a finer tip lays an even line.
+const STREAK_TIP = 1.5;
+const STREAK_FULL = 4;
+// A stroke mottles (±8%) as its water pools while drying; a nearly dry brush
+// (water below MOTTLE_WATER) lays its colour evenly, in proportion.
+const MOTTLE = 0.08;
+const MOTTLE_WATER = 0.25;
 
 export class PigmentModel {
 	constructor( { W, H, pigments, T, paper, reserve } ) {
@@ -46,13 +63,11 @@ export class PigmentModel {
 		this.T = T;
 		this.paper = paper;
 		this.cap = new Float32Array( N );
-		for ( let i = 0; i < N; i++ ) {
-			// Masked (reserved) paper never takes water: washes flow around it.
-			// Dry paper wicks a little water from a wet neighbour, so adjacent washes
-			// knit together instead of leaving a pale seam.
-			this.cap[ i ] = reserve && reserve[ i ] ? 1e9 : 0.3 + 0.4 * paper[ i ];
-		}
-		this.reserve = reserve || new Uint8Array( N );
+		// Masked paper (1: for good, 2: until the mask is rubbed off, see
+		// liftMask), as analysed; `reserve` is what is masked now.
+		this.masked = reserve || new Uint8Array( N );
+		this.reserve = new Uint8Array( N );
+		this._mask();
 		this.meanA = new Float32Array( this.K );
 		pigments.forEach( ( p, k ) => ( this.meanA[ k ] = ( p.A[ 0 ] + p.A[ 1 ] + p.A[ 2 ] ) / 3 ) );
 		// Target optical density per cell (all pigments): brush strokes never
@@ -63,7 +78,7 @@ export class PigmentModel {
 			for ( let k = 0; k < this.K; k++ ) {
 				dsum += T[ 0 ][ k ][ i ] * this.meanA[ k ];
 			}
-			this.targetDens[ i ] = dsum * 1.05 + 0.02;
+			this.targetDens[ i ] = dsum * DENS_OVER + DENS_PAD;
 		}
 		this.h = new Float32Array( N );
 		this.g = [];
@@ -105,7 +120,30 @@ export class PigmentModel {
 		this.rowX1 = new Int32Array( this.TY ).fill( -1 );
 	}
 
+	/**
+	 * Lays the masking fluid. Masked paper never takes water: washes flow
+	 * around it. Dry paper wicks a little water from a wet neighbour, so
+	 * adjacent washes knit together instead of leaving a pale seam.
+	 */
+	_mask() {
+		this.reserve.set( this.masked );
+		for ( let i = 0; i < this.N; i++ ) {
+			this.cap[ i ] = this.reserve[ i ] ? 1e9 : 0.3 + 0.4 * this.paper[ i ];
+		}
+	}
+
+	/** Rubs off the mask laid until the details (2): that paper takes paint now. */
+	liftMask() {
+		for ( let i = 0; i < this.N; i++ ) {
+			if ( 2 === this.reserve[ i ] ) {
+				this.reserve[ i ] = 0;
+				this.cap[ i ] = 0.3 + 0.4 * this.paper[ i ];
+			}
+		}
+	}
+
 	reset() {
+		this._mask();
 		this.h.fill( 0 );
 		for ( let k = 0; k < this.K; k++ ) {
 			this.g[ k ].fill( 0 );
@@ -270,6 +308,7 @@ export class PigmentModel {
 			let n = 0;
 			let np = 0;
 			const P = b.path;
+			const cells = [];
 			for ( let j = 0; j < P.length; j += 4 ) {
 				if ( P[ j + 3 ] > 0 ) {
 					const i = Math.round( P[ j + 1 ] ) * this.W + Math.round( P[ j ] );
@@ -279,10 +318,12 @@ export class PigmentModel {
 					if ( nd > 0.02 ) {
 						pos += nd;
 						np++;
+						cells.push( i );
 					}
 				}
 			}
 			b.meanNeed = n ? sum / n : 0;
+			this._mixFor( b, cells, pos );
 			// Where the wash runs on under a neighbour, it keeps its own tone.
 			b.toneFloor = np ? ( 0.6 * b.amount * pos ) / np : 0;
 			if ( b.graded ) {
@@ -326,6 +367,8 @@ export class PigmentModel {
 		const dk = this.d[ b.k ];
 		let sumM = 0;
 		let sumN = 0;
+		const cells = [];
+		let sumC = 0;
 		for ( let y = g.y0; y <= g.y1; y++ ) {
 			for ( let x = g.x0; x <= g.x1; x++ ) {
 				const m = g.mask( x, y );
@@ -337,11 +380,89 @@ export class PigmentModel {
 				if ( nd > 0 ) {
 					sumN += m * nd;
 				}
+				if ( nd > 0.02 ) {
+					cells.push( i );
+					sumC += nd;
+				}
 				sumM += m;
 			}
 		}
 		b.meanNeed = sumM > 0 ? sumN / sumM : 0;
+		this._mixFor( b, cells, sumC );
 		return ! ( b.meanNeed < b.minNeed && b.spill <= 0 );
+	}
+
+	/**
+	 * A brush carries a mix: where the cells a gesture paints (those that
+	 * need its pigment, with `sumK` of it in all) also call for a second
+	 * pigment, the painter mixes that in on the palette, in the ratio they
+	 * need it. Laid together, two pigments keep their hue; laid one after
+	 * the other, the first takes the cell's darkness and the second cannot
+	 * follow (a dark brown left red). Sets b.mix = { k, ratio } or null.
+	 */
+	_mixFor( b, cells, sumK ) {
+		b.mix = null;
+		if ( ! cells.length || sumK <= 0 ) {
+			return;
+		}
+		let best = -1;
+		let bestSum = 0;
+		for ( let j = 0; j < this.K; j++ ) {
+			if ( j === b.k ) {
+				continue;
+			}
+			const Tj = this._T( b.level, j );
+			const dj = this.d[ j ];
+			const gj = this.g[ j ];
+			let sum = 0;
+			let n = 0;
+			for ( const i of cells ) {
+				const nd = Tj[ i ] - dj[ i ] - ( b.graded ? 0 : gj[ i ] );
+				if ( nd > 0.02 ) {
+					sum += nd;
+					n++;
+				}
+			}
+			if ( n >= MIX_SHARE * cells.length && sum > bestSum ) {
+				best = j;
+				bestSum = sum;
+			}
+		}
+		if ( best >= 0 && bestSum >= MIX_MIN * sumK ) {
+			b.mix = { k: best, ratio: bestSum / sumK };
+		}
+	}
+
+	/**
+	 * Lays `add` of the gesture's pigment at cell i, and its mix partner in
+	 * proportion (no more than the cell still needs of it), never past the
+	 * darkness the cell may take, counting all the paint already there: a
+	 * mix too dark is thinned as a whole, so its hue holds. Returns the
+	 * pigment laid.
+	 */
+	_lay( b, i, add, mixT ) {
+		const k = b.k;
+		const mx = b.mix;
+		let addJ = 0;
+		if ( mx ) {
+			addJ = Math.min( add * mx.ratio, Math.max( 0, mixT[ i ] - this.d[ mx.k ][ i ] - this.g[ mx.k ][ i ] ) );
+		}
+		let have = 0;
+		for ( let q = 0; q < this.K; q++ ) {
+			have += ( this.d[ q ][ i ] + this.g[ q ][ i ] ) * this.meanA[ q ];
+		}
+		const room = ( this.layerDens || this.targetDens )[ i ] - have;
+		const dens = add * Math.max( 0.05, this.meanA[ k ] ) + ( addJ ? addJ * Math.max( 0.05, this.meanA[ mx.k ] ) : 0 );
+		if ( dens > room ) {
+			const f = room > 0 ? room / dens : 0;
+			add *= f;
+			addJ *= f;
+		}
+		this.g[ k ][ i ] += add;
+		if ( addJ > 0 ) {
+			this.g[ mx.k ][ i ] += addJ;
+		}
+		return add + addJ;
 	}
 
 	/**
@@ -383,7 +504,8 @@ export class PigmentModel {
 		const invR = 1 / ( b.r * b.reach * 0.85 );
 		const passes = b.passes || 1;
 		let total = 0;
-		const bit = k >= 0 ? 1 << k : 0;
+		const mixT = k >= 0 && b.mix ? this._T( b.level, b.mix.k ) : null;
+		const bit = ( k >= 0 ? 1 << k : 0 ) | ( mixT ? 1 << b.mix.k : 0 );
 		const seed = b.seed | 0;
 		let ty0 = g.y1;
 		let ty1 = g.y0;
@@ -438,17 +560,7 @@ export class PigmentModel {
 					if ( b.uniform ) {
 						// A drop: one tone, its own organic outline, wherever the water goes
 						// (but never past the current layer's value at any cell).
-						let add = b.amount * meanNeed * ( 0.92 + 0.16 * n ) * m;
-						let have = 0;
-						for ( let q = 0; q < this.K; q++ ) {
-							have += ( this.d[ q ][ i ] + this.g[ q ][ i ] ) * this.meanA[ q ];
-						}
-						const room = ( ( this.layerDens || this.targetDens )[ i ] - have ) / Math.max( 0.05, this.meanA[ k ] );
-						if ( add > room ) {
-							add = room > 0 ? room : 0;
-						}
-						gk[ i ] += add;
-						total += add;
+						total += this._lay( b, i, b.amount * meanNeed * ( 0.92 + 0.16 * n ) * m, mixT );
 						if ( b.water > 0 ) {
 							const hv = h[ i ] + b.water * m * ( 0.75 + 0.5 * n );
 							h[ i ] = hv > 1.6 ? 1.6 : hv;
@@ -467,8 +579,10 @@ export class PigmentModel {
 					pig = Math.max( pig, b.spill * m );
 					const add = pig * mm;
 					if ( add > 0 ) {
-						gk[ i ] += add;
-						total += add;
+						total += mixT ? this._lay( b, i, add, mixT ) : add;
+						if ( ! mixT ) {
+							gk[ i ] += add;
+						}
 					}
 				} else {
 					total += b.water * mm;
@@ -527,6 +641,7 @@ export class PigmentModel {
 		}
 		const k = b.k;
 		const gk = k >= 0 ? this.g[ k ] : null;
+		const mixT = gk && b.mix ? this._T( b.level, b.mix.k ) : null;
 		const seed = b.seed | 0;
 		let total = 0;
 		let tx0 = W;
@@ -582,6 +697,7 @@ export class PigmentModel {
 			// The brush unloads as it goes: a little lighter toward the end.
 			const load = 1 - ( b.unload ?? 0.2 ) * sj;
 			const dry = b.water < 0.25;
+			const mottle = MOTTLE * Math.min( 1, b.water / MOTTLE_WATER );
 			const xa = Math.max( b.bx0, Math.floor( Math.min( ax, cx ) - ext ) );
 			const xb = Math.min( b.bx0 + b.bw - 1, Math.ceil( Math.max( ax, cx ) + ext ) );
 			const ya = Math.max( b.by0, Math.floor( Math.min( ay, cy ) - ext ) );
@@ -637,28 +753,20 @@ export class PigmentModel {
 						b.shared[ i ] = cover;
 					}
 					// Bristle streaks: a texture that depends only on the position
-					// across the stroke, so it runs along the stroke's direction.
+					// across the stroke, so it runs along the stroke's direction. A
+					// broad brush's: a fine tip lays an even line.
 					const across = ( ( x - qx ) * -uy + ( y - qy ) * ux ) / rr;
 					const bristle = valueNoise( across * 4.5 + 7.3, 0.5, seed ^ 0x2c1b );
-					let streak = 0.82 + 0.36 * bristle;
+					const sa = rr <= STREAK_TIP ? 0 : Math.min( 1, ( rr - STREAK_TIP ) / ( STREAK_FULL - STREAK_TIP ) );
+					let streak = 1 + 0.18 * sa * ( 2 * bristle - 1 );
 					// Near-dry strokes skip on the paper's tooth (dry-brush breaks).
 					if ( dry && rr > 2.5 && bristle < 0.28 && this.paper[ i ] > 0.5 ) {
 						streak *= 0.25;
 					}
 					if ( gk ) {
-						let add = tone * load * streak * ( 0.92 + 0.16 * n ) * ( cover - had );
 						// Never past the image's darkness at this cell, counting all the
 						// paint already here (drops, other colours, this stroke).
-						let have = 0;
-						for ( let q = 0; q < this.K; q++ ) {
-							have += ( this.d[ q ][ i ] + this.g[ q ][ i ] ) * this.meanA[ q ];
-						}
-						const room = ( ( this.layerDens || this.targetDens )[ i ] - have ) / Math.max( 0.05, this.meanA[ k ] );
-						if ( add > room ) {
-							add = room > 0 ? room : 0;
-						}
-						gk[ i ] += add;
-						total += add;
+						total += this._lay( b, i, tone * load * streak * ( 1 + mottle * ( 2 * n - 1 ) ) * ( cover - had ), mixT );
 					}
 					if ( b.water > 0 ) {
 						const hv = h[ i ] + b.water * ( 0.8 + 0.4 * n ) * ( cover - had );
@@ -676,26 +784,42 @@ export class PigmentModel {
 			}
 		}
 		if ( tx1 >= tx0 ) {
-			this._touch( tx0, ty0, tx1, ty1, k >= 0 ? 1 << k : 0, b.water > 0 );
+			this._touch( tx0, ty0, tx1, ty1, ( k >= 0 ? 1 << k : 0 ) | ( mixT ? 1 << b.mix.k : 0 ), b.water > 0 );
 		}
 		return total;
 	}
 
 	/** Sponge lift: removes pigment (correcting regions that went too dark). */
 	lift( b ) {
+		if ( b.scrub ) {
+			return this.scrub( b );
+		}
 		const { W, H } = this;
-		const R = b.r + 2;
-		const x0 = Math.max( 0, Math.floor( b.x - R ) );
-		const x1 = Math.min( W - 1, Math.ceil( b.x + R ) );
-		const y0 = Math.max( 0, Math.floor( b.y - R ) );
-		const y1 = Math.min( H - 1, Math.ceil( b.y + R ) );
+		// A blot (x, y, r), or a line drawn with the damp brush: `path`, points
+		// x, y and the brush's radius there.
+		const P = b.path || [ b.x, b.y, b.r ];
+		let x0 = W;
+		let y0 = H;
+		let x1 = 0;
+		let y1 = 0;
+		for ( let q = 0; q < P.length; q += 3 ) {
+			const R = P[ q + 2 ] + 2;
+			x0 = Math.min( x0, Math.max( 0, Math.floor( P[ q ] - R ) ) );
+			x1 = Math.max( x1, Math.min( W - 1, Math.ceil( P[ q ] + R ) ) );
+			y0 = Math.min( y0, Math.max( 0, Math.floor( P[ q + 1 ] - R ) ) );
+			y1 = Math.max( y1, Math.min( H - 1, Math.ceil( P[ q + 1 ] + R ) ) );
+		}
 		let bits = 0;
 		let removed = 0;
 		for ( let y = y0; y <= y1; y++ ) {
 			for ( let x = x0; x <= x1; x++ ) {
-				const dx = x - b.x;
-				const dy = y - b.y;
-				const dist = Math.sqrt( dx * dx + dy * dy ) / b.r;
+				// How far inside the brush's track (0 at its edge, 1 on it).
+				let dist = 1;
+				for ( let q = 0; q < P.length; q += 3 ) {
+					const dx = x - P[ q ];
+					const dy = y - P[ q + 1 ];
+					dist = Math.min( dist, Math.sqrt( dx * dx + dy * dy ) / Math.max( 0.5, P[ q + 2 ] ) );
+				}
 				if ( dist >= 1 ) {
 					continue;
 				}
@@ -723,6 +847,87 @@ export class PigmentModel {
 		}
 		this._touch( x0, y0, x1, y1, bits, true );
 		return removed;
+	}
+
+	/**
+	 * Scrub: a damp brush worked over an overworked patch loosens the paint
+	 * and evens it out, each pigment drawn towards its mix just around (a
+	 * fleck merges into what is round it, a pinhole of paper fills from
+	 * its neighbours). Nothing is added or taken away; masked paper is
+	 * left alone. Same track as a lift (`path`, or x, y, r).
+	 */
+	scrub( b ) {
+		const { W, H, K } = this;
+		const P = b.path || [ b.x, b.y, b.r ];
+		let x0 = W;
+		let y0 = H;
+		let x1 = 0;
+		let y1 = 0;
+		for ( let q = 0; q < P.length; q += 3 ) {
+			const R = P[ q + 2 ] + 2;
+			x0 = Math.min( x0, Math.max( 0, Math.floor( P[ q ] - R ) ) );
+			x1 = Math.max( x1, Math.min( W - 1, Math.ceil( P[ q ] + R ) ) );
+			y0 = Math.min( y0, Math.max( 0, Math.floor( P[ q + 1 ] - R ) ) );
+			y1 = Math.max( y1, Math.min( H - 1, Math.ceil( P[ q + 1 ] + R ) ) );
+		}
+		const bw = x1 - x0 + 1;
+		const bh = y1 - y0 + 1;
+		// Paint as it is (deposited and still afloat), read before any moves.
+		const v = new Float32Array( K * bw * bh );
+		for ( let k = 0; k < K; k++ ) {
+			for ( let y = 0; y < bh; y++ ) {
+				for ( let x = 0; x < bw; x++ ) {
+					const i = ( y0 + y ) * W + x0 + x;
+					v[ ( k * bh + y ) * bw + x ] = this.d[ k ][ i ] + this.g[ k ][ i ];
+				}
+			}
+		}
+		const open = ( x, y ) => ! this.reserve[ ( y0 + y ) * W + x0 + x ];
+		let bits = 0;
+		for ( let y = 0; y < bh; y++ ) {
+			for ( let x = 0; x < bw; x++ ) {
+				if ( ! open( x, y ) ) {
+					continue;
+				}
+				let dist = 1;
+				for ( let q = 0; q < P.length; q += 3 ) {
+					dist = Math.min( dist, Math.hypot( x0 + x - P[ q ], y0 + y - P[ q + 1 ] ) / Math.max( 0.5, P[ q + 2 ] ) );
+				}
+				if ( dist >= 1 ) {
+					continue;
+				}
+				const m = Math.min( 1, ( 1 - dist ) * 2.5 ) * ( 0.8 + 0.4 * valueNoise( ( x0 + x ) * 0.3, ( y0 + y ) * 0.3, b.seed | 0 ) );
+				const f = Math.min( 0.9, b.strength * m );
+				const i = ( y0 + y ) * W + x0 + x;
+				for ( let k = 0; k < K; k++ ) {
+					let s = 0;
+					let wsum = 0;
+					for ( let dy = -1; dy <= 1; dy++ ) {
+						for ( let dx = -1; dx <= 1; dx++ ) {
+							const xx = x + dx;
+							const yy = y + dy;
+							if ( xx < 0 || yy < 0 || xx >= bw || yy >= bh || ! open( xx, yy ) ) {
+								continue;
+							}
+							const wgt = ( 2 - Math.abs( dx ) ) * ( 2 - Math.abs( dy ) );
+							s += v[ ( k * bh + yy ) * bw + xx ] * wgt;
+							wsum += wgt;
+						}
+					}
+					const was = v[ ( k * bh + y ) * bw + x ];
+					const now = was + ( s / wsum - was ) * f;
+					// What floats stays afloat; the rest settles as deposit.
+					this.g[ k ][ i ] = Math.min( this.g[ k ][ i ], now );
+					this.d[ k ][ i ] = now - this.g[ k ][ i ];
+					if ( this.g[ k ][ i ] > 0 ) {
+						bits |= 1 << k;
+					}
+				}
+				this.h[ i ] = Math.min( 1.6, this.h[ i ] + 0.12 * m * ( b.wet ?? 1 ) );
+			}
+		}
+		this._touch( x0, y0, x1, y1, bits, true );
+		return 0;
 	}
 
 	_touch( x0, y0, x1, y1, bits, wet ) {
