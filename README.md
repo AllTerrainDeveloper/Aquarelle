@@ -189,10 +189,14 @@ its masstone, the strongest shade of it the picture uses: water only ever
 makes a paint lighter, so the light shades come from the dark one, never
 the other way round. A colour the palette can already make, watered down
 from one of its paints (to within a just-noticeable difference at a
-quarter, half and full strength) or mixed from two (closer still), is left
-off, and so is one of nearly a chosen paint's hue and no darker (it is that
-paint watered down; a darker one replaces it as the tube colour), and its slot goes to the next colour the picture needs; a paint a
-later choice makes redundant is taken off again. So a picture with seven
+quarter, half and full strength) or, once there are three paints, mixed from
+two (closer still), is left off. (With fewer, a colour only a mix makes
+still comes in: the first washes lay one paint per area, so an old master's
+brown made from its ochre and grey would come out olive.) So is one of
+nearly a chosen paint's hue and no darker (it is that paint watered down;
+a darker one replaces it as the tube colour). A colour left off gives its
+slot to the next colour the picture needs, and a paint a later choice
+makes redundant is taken off again. So a picture with seven
 shades of one blue gets one blue, and most pictures need 3 to 7 paints
 (at most 8 are taken: past that, on the samples, more paints only made the
 paintings worse). Shapes still follow the picture's own colours, so the
@@ -238,9 +242,11 @@ for that moment of stepping back.
    *The palette* above), decomposes every pixel into pigment amounts
    (Beer–Lambert, non-negative least squares over pigment pairs), and finds the big areas,
    real edges, and what to mask: thin whites (lettering, highlights) for
-   good, and small shapes clearly lighter than a solid darker area around
-   them (light strands in dark hair, lit windows, flowers in the grass, a
-   catchlight) until the details, when the mask is rubbed off and they are
+   good, and small light shapes clearly lighter than a solid darker area
+   around them (light strands in dark hair, lit windows, flowers in the
+   grass, a catchlight; not a mid-dark glint on a dark wall, which would
+   need nearly all its paint back and show as a fleck of bare paper) until
+   the details, when the mask is rubbed off and they are
    painted on clean paper (a light colour laid over the hair's brown would
    stay dark). Where the dark is the thin part (branches against the sky),
    nothing is masked: the light goes on first and the dark over it.

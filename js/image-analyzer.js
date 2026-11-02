@@ -25,6 +25,10 @@ const REACH_MIX = 0.015;
 // Choosing the palette, a colour made by mixing counts as this much
 // further off (squared) than one made with a single paint.
 const MIX_COST = 1.5;
+// A palette smaller than this keeps a paint its others can only mix: a
+// brown from an ochre and a grey looks right on paper in theory, but the
+// first washes lay one paint per area, so the brown comes out olive.
+const MIN_PAINTS = 3;
 // Colours whose absorbances lie within ~8° are one paint at two strengths.
 const SAME_PAINT = Math.cos( ( 8 * Math.PI ) / 180 );
 // Choosing the palette, a paint goes at most this far past its masstone.
@@ -43,8 +47,10 @@ const SIMPLIFY_RANGE = 0.05;
 const MASK_STEP = 0.05;
 const MASK_SOLID = 0.7;
 // ...and only a shape that is itself light (OKLab L): a dark grey speck in a
-// black area is painted with less paint, not masked.
-const MASK_MIN_L = 0.4;
+// black area is painted with less paint, not masked. A mid-dark one (a
+// glint on a dark wall in an old master) is not light either: masked, it
+// needs almost all its paint back and comes out as a fleck of bare paper.
+const MASK_MIN_L = 0.55;
 
 /* ------------------------------------------------------------------ */
 /* Filters                                                              */
@@ -703,6 +709,7 @@ function watercolourPalette( candidates, lin, N, K, rng ) {
 	// wrong paint taking the darkness the right one needs (a sky's crimson
 	// washed in magenta stays purple and too dark). A darker one is the
 	// tube colour of the two: it comes in, and the lighter one goes.
+	// Below MIN_PAINTS a paint only a mix of two makes still comes in.
 	const reach = ( p, among ) => {
 		const { u, L } = paints[ p ];
 		for ( const a of among ) {
@@ -711,11 +718,12 @@ function watercolourPalette( candidates, lin, N, K, rng ) {
 				return true;
 			}
 		}
+		const mixes = among.length >= MIN_PAINTS;
 		for ( const t of paints[ p ].tints ) {
 			let ok = false;
 			for ( let a = 0; a < among.length && ! ok; a++ ) {
 				ok = mixErr( [ paints[ among[ a ] ].A ], t.D, t.w, t.lab ) < REACH * REACH;
-				for ( let b = a + 1; b < among.length && ! ok; b++ ) {
+				for ( let b = a + 1; mixes && b < among.length && ! ok; b++ ) {
 					ok = mixErr( [ paints[ among[ a ] ].A, paints[ among[ b ] ].A ], t.D, t.w, t.lab ) < REACH_MIX * REACH_MIX;
 				}
 			}
