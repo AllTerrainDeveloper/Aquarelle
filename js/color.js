@@ -50,3 +50,19 @@ export const PAPER_LINEAR = PAPER_SRGB.map( srgbToLinear );
 export function toHex( srgb ) {
 	return '#' + srgb.map( ( c ) => Math.round( Math.max( 0, Math.min( 1, c ) ) * 255 ).toString( 16 ).padStart( 2, '0' ) ).join( '' );
 }
+
+/**
+ * The colour (hex) of pigment k with a second one mixed in (`mix`:
+ * { k, ratio }, see PigmentModel), at the first one's full strength:
+ * absorbances add, as the paints do on the palette.
+ */
+export function mixHex( pigments, k, mix ) {
+	const A = pigments[ k ].A;
+	if ( ! mix ) {
+		return pigments[ k ].hex;
+	}
+	const B = pigments[ mix.k ].A;
+	const m = A.map( ( v, ch ) => v + mix.ratio * B[ ch ] );
+	const f = Math.max( A[ 0 ], A[ 1 ], A[ 2 ] ) / Math.max( 1e-6, m[ 0 ], m[ 1 ], m[ 2 ] );
+	return toHex( m.map( ( v, ch ) => linearToSrgb( PAPER_LINEAR[ ch ] * Math.exp( -v * f ) ) ) );
+}

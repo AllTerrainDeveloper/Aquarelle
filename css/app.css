@@ -584,8 +584,9 @@ button.attention {
 	box-shadow: none;
 }
 
-/* Cinematic: keep painting until a target similarity */
-#cinematicOpts {
+/* Cinematic options, and the similarity goal (every tab) */
+#cinematicOpts,
+.sim-goal {
 	display: flex;
 	flex-wrap: wrap;
 	align-items: center;
@@ -596,12 +597,12 @@ button.attention {
 	display: none;
 }
 
-#cinematicOpts .inline {
+.sim-goal .inline {
 	display: inline-flex;
 	align-items: center;
 	gap: 4px;
 }
 
-#cinematicOpts input[type="number"] {
+.sim-goal input[type="number"] {
 	width: 4.5em;
 }

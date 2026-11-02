@@ -82,6 +82,9 @@ const animation = new AnimationController( {
 	onStats: updateHud,
 	onDone: handleDone,
 } );
+// ?lockstep: frames of a fixed length and no time budgets, so a painting
+// (and its benchmark score) comes out the same on every run.
+animation.lockstep = params.has( 'lockstep' );
 // Cinematic: the camera, the desk and the strand brush.
 const director = new Director( { stage: $( 'canvases' ), figure: document.querySelector( '.canvases .paint' ), overlay: $( 'overlay' ), renderer } );
 animation.director = director;
@@ -101,16 +104,25 @@ const fmt = ( s ) => {
 const setStatus = ( t ) => ( $( 'status' ).textContent = t );
 const srcSize = ( s ) => [ s.naturalWidth || s.width, s.naturalHeight || s.height ];
 
+// The palette takes the paints a picture needs (see watercolourPalette), up
+// to this many: past it, on the samples, more paints only made the
+// paintings worse (each slot went to a paint the others nearly make).
+const MAX_PAINTS = 8;
+// How much a photograph is simplified into painterly shapes at Balanced (1:
+// as much as at Soft); finer Detail simplifies less, Maximum not at all.
+const SIMPLIFY_BALANCED = 0.6;
+
 /**
  * Fine-detail levels: grid resolution, how many detail strokes the hand
- * makes, and how small they get. Higher levels keep text and logos legible.
+ * makes, how small they get, and how much a photograph is simplified.
+ * Higher levels keep text and logos legible.
  */
 const DETAIL = [
-	{ name: 'Soft', res: 300, strokes: 0.6, fine: 1.25 },
-	{ name: 'Balanced', res: 400, strokes: 1, fine: 1 },
-	{ name: 'Fine', res: 520, strokes: 1.7, fine: 0.75 },
-	{ name: 'Very fine', res: 640, strokes: 2.4, fine: 0.6 },
-	{ name: 'Maximum', res: 800, strokes: 3.2, fine: 0.5 },
+	{ name: 'Soft', res: 300, strokes: 0.6, fine: 1.25, simplify: 1 },
+	{ name: 'Balanced', res: 400, strokes: 1, fine: 1, simplify: SIMPLIFY_BALANCED },
+	{ name: 'Fine', res: 520, strokes: 1.7, fine: 0.75, simplify: 0.35 },
+	{ name: 'Very fine', res: 640, strokes: 2.4, fine: 0.6, simplify: 0.15 },
+	{ name: 'Maximum', res: 800, strokes: 3.2, fine: 0.5, simplify: 0 },
 ];
 const detailLevel = () => DETAIL[ Number( $( 'detail' ).value ) ] || DETAIL[ 1 ];
 
@@ -304,7 +316,7 @@ async function analyze() {
 	const refW = Math.max( W, Math.round( sw * rs ) );
 	const refH = Math.max( H, Math.round( sh * rs ) );
 	const refPixels = grab( refW, refH );
-	const K = Number( $( 'pigments' ).value );
+	const K = MAX_PAINTS;
 	const seed = Number( $( 'seed' ).value ) >>> 0;
 	const minutes = Math.min( 30, Math.max( 1, Number( $( 'duration' ).value ) || 10 ) );
 	const duration = minutes * 60;
@@ -312,7 +324,7 @@ async function analyze() {
 	const t0 = performance.now();
 	let r;
 	try {
-		r = await call( 'analyze', { width: W, height: H, pixels: pixels.buffer, refW, refH, refPixels: refPixels.buffer, K, seed, duration, exclude: [ ...excluded ], remap: [ ...remap ], style: $( 'style' ).value, detail: { strokes: detailLevel().strokes, fine: detailLevel().fine } }, [
+		r = await call( 'analyze', { width: W, height: H, pixels: pixels.buffer, refW, refH, refPixels: refPixels.buffer, K, seed, duration, exclude: [ ...excluded ], remap: [ ...remap ], style: $( 'style' ).value, detail: { strokes: detailLevel().strokes, fine: detailLevel().fine }, simplify: detailLevel().simplify }, [
 			pixels.buffer,
 			refPixels.buffer,
 		] );
@@ -470,15 +482,6 @@ const reanalyze = () => {
 	clearTimeout( reanalyzeTimer );
 	reanalyzeTimer = setTimeout( () => session && analyze(), 150 );
 };
-$( 'pigments' ).addEventListener( 'input', ( e ) => {
-	$( 'pigOut' ).textContent = e.target.value;
-} );
-$( 'pigments' ).addEventListener( 'change', () => {
-	// A different palette size gives different colours: start with all allowed.
-	excluded.clear();
-	remap.clear();
-	reanalyze();
-} );
 $( 'duration' ).addEventListener( 'input', ( e ) => {
 	$( 'durOut' ).textContent = e.target.value + ' min';
 } );
@@ -501,7 +504,7 @@ function setPlayLabel() {
 
 /* Painting modes (tabs) ------------------------------------------------------------- */
 const MODE_HINTS = {
-	quick: 'The whole painting, time-lapsed: about 20 seconds, longer if it needs it to finish everything.',
+	quick: 'The whole painting, time-lapsed, then refined while that still improves it: usually one to a few minutes.',
 	endless: 'Paints, then keeps refining the areas that look least like the image, until nothing is left to improve.',
 	realtime: "At the painter's own pace, with every animation. Paints everything; waits for drying are fast-forwarded.",
 	custom: 'Fits the painting into the time you choose, at the playback speed you choose.',
@@ -529,6 +532,8 @@ function selectTab( name, focus ) {
 	$( 'endlessOpts' ).hidden = 'endless' !== name;
 	$( 'customOpts' ).hidden = 'custom' !== name;
 	$( 'cinematicOpts' ).hidden = 'cinematic' !== name;
+	// Endless already keeps going: there the goal is where it stops.
+	$( 'untilSimLabel' ).textContent = 'endless' === name ? 'Stop once similarity reaches' : 'Keep painting until similarity reaches';
 	try {
 		localStorage.setItem( 'aquarelle-tab', name );
 	} catch ( err ) {}
@@ -566,7 +571,7 @@ for ( const b of tabButtons ) {
 }
 selectTab( tab );
 
-/** Cinematic's target similarity (%), kept between 50 and 99. */
+/** The target similarity (%), kept between 50 and 99. */
 function simTarget() {
 	const v = Math.round( Number( $( 'simTarget' ).value ) || 85 );
 	return Math.min( 99, Math.max( 50, v ) );
@@ -597,17 +602,18 @@ $( 'simTarget' ).addEventListener( 'change', ( e ) => {
 	} catch ( err ) {}
 } );
 
-/** The selected tab as a controller mode, the Endless flag and any target similarity. */
+/**
+ * The selected tab as a controller mode, the Endless flag and any target
+ * similarity. With the goal on, any tab paints, then refines (as Endless
+ * does) until the target; in Endless it is where the refining stops.
+ */
 function tabMode() {
+	const goal = $( 'untilSim' ).checked ? simTarget() : 0;
 	if ( 'endless' === tab ) {
 		const pace = document.querySelector( 'input[name="pace"]:checked' );
-		return { mode: pace ? pace.value : 'quick', endless: true };
+		return { mode: pace ? pace.value : 'quick', endless: true, target: goal };
 	}
-	if ( 'cinematic' === tab && $( 'untilSim' ).checked ) {
-		// Paints, then refines (as Endless does) until the target similarity.
-		return { mode: 'cinematic', endless: true, target: simTarget() };
-	}
-	return { mode: 'custom' === tab ? 'paint' : tab, endless: false };
+	return { mode: 'custom' === tab ? 'paint' : tab, endless: !! goal, target: goal };
 }
 
 /**
@@ -638,6 +644,8 @@ async function play() {
 		animation.setMode( mode, QUICK_SECONDS, endless, target );
 		// Cinematic leaves a clean border around the sheet, as a careful painter does.
 		session.splash.border = 'cinematic' === mode ? makeBorder( session.W, session.H, session.seed ) : null;
+		// ...which the similarity scores leave out: it is unpainted on purpose.
+		await call( 'setMargin', { share: session.splash.border ? session.splash.border.reach : 0 } );
 		syncCinematic();
 		director.reset();
 		animation.start();
@@ -837,7 +845,7 @@ function renderBench( rows ) {
 }
 
 $( 'bench' ).addEventListener( 'click', runBench );
-window.__app = { runBench, animation, adaptive, get session() { return session; }, loadSample: ( n ) => loadSource( makeSample( n ), n ), setSpeed: ( s ) => animation.setSpeed( s ) };
+window.__app = { runBench, animation, adaptive, score: finalEvaluation, get session() { return session; }, loadSample: ( n ) => loadSource( makeSample( n ), n ), setSpeed: ( s ) => animation.setSpeed( s ) };
 
 layout();
 if ( params.get( 'bench' ) ) {

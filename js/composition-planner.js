@@ -156,6 +156,50 @@ export function depthInside( mask, W, H, cap = Infinity ) {
 }
 
 /**
+ * packDiscs over one patch (`cells`, sheet indices), worked out on its
+ * bounding box (plus a margin) instead of the whole sheet: the same discs,
+ * in sheet coordinates, for a fraction of the work. Nothing outside the
+ * patch is covered beforehand.
+ */
+export function packDiscsIn( cells, W, H, cap, opts ) {
+	let x0 = W;
+	let y0 = H;
+	let x1 = -1;
+	let y1 = -1;
+	for ( const i of cells ) {
+		const x = i % W;
+		const y = ( i / W ) | 0;
+		x0 = Math.min( x0, x );
+		x1 = Math.max( x1, x );
+		y0 = Math.min( y0, y );
+		y1 = Math.max( y1, y );
+	}
+	if ( x1 < 0 ) {
+		return [];
+	}
+	// A disc's centre moves off its cell by under its depth: a few cells of
+	// margin keep it from the box's edge (the sheet's edge stays where it is).
+	const m = 3;
+	const bx = Math.max( 0, x0 - m );
+	const by = Math.max( 0, y0 - m );
+	const bw = Math.min( W - 1, x1 + m ) - bx + 1;
+	const bh = Math.min( H - 1, y1 + m ) - by + 1;
+	const mask = new Uint8Array( bw * bh );
+	for ( const i of cells ) {
+		mask[ ( ( ( i / W ) | 0 ) - by ) * bw + ( i % W ) - bx ] = 1;
+	}
+	// The sheet's edge is not a border: where the box stops short of it, it
+	// must not become one either.
+	const depth = depthInside( mask, bw, bh, cap );
+	const discs = packDiscs( mask, depth, new Uint8Array( bw * bh ), { ...opts, W: bw, H: bh } );
+	for ( const d of discs ) {
+		d.x += bx;
+		d.y += by;
+	}
+	return discs;
+}
+
+/**
  * Largest-first packing: the deepest uncovered cell gets the biggest gesture
  * whose footprint fits (plus a seam so neighbouring washes meet).
  */
@@ -739,6 +783,16 @@ export function sweepStrokes( cells, W, w, seam, o, maxSamples = 260 ) {
 		const li = at( lx, ly );
 		return local[ li ] && ( depth[ li ] >= w * 0.5 || ! strong( lx, ly ) );
 	};
+	// Whether the straight line between two local points leaves the shape.
+	const leaves = ( ax, ay, bx, by ) => {
+		const n = Math.ceil( Math.hypot( bx - ax, by - ay ) );
+		for ( let q = 1; q < n; q++ ) {
+			if ( ! local[ at( ax + ( ( bx - ax ) * q ) / n, ay + ( ( by - ay ) * q ) / n ) ] ) {
+				return true;
+			}
+		}
+		return false;
+	};
 	let raw = [];
 	let lastX = 0;
 	let lastY = 0;
@@ -771,7 +825,10 @@ export function sweepStrokes( cells, W, w, seam, o, maxSamples = 260 ) {
 			const from = row & 1 ? a1 : a0;
 			const to = row & 1 ? a0 : a1;
 			const gy = ly + y0 - 1;
-			if ( raw.length && Math.hypot( from + x0 - 1 - lastX, gy - lastY ) > w * 3 ) {
+			// The brush lifts between two runs that are far apart, or whose
+			// straight join leaves the shape (a notch of sky between two tall
+			// buildings): carried across, it would paint the gap.
+			if ( raw.length && ( Math.hypot( from + x0 - 1 - lastX, gy - lastY ) > w * 3 || leaves( lastX - x0 + 1, lastY - y0 + 1, from, ly ) ) ) {
 				flush();
 			}
 			const n = Math.max( 1, Math.ceil( Math.abs( to - from ) / Math.max( 0.6, w * 0.5 ) ) );

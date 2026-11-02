@@ -147,6 +147,30 @@ export function combineScore( { deltaE: dE, deltaE4, ssim: s, edgeCorr } ) {
 	);
 }
 
+/** The part of a lab image (3 per cell) inside a margin of `m` cells. */
+function inner( lab, W, H, m ) {
+	const w = W - 2 * m;
+	const h = H - 2 * m;
+	const out = new Float32Array( w * h * 3 );
+	for ( let y = 0; y < h; y++ ) {
+		out.set( lab.subarray( ( ( y + m ) * W + m ) * 3, ( ( y + m ) * W + m + w ) * 3 ), y * w * 3 );
+	}
+	return { lab: out, W: w, H: h };
+}
+
+/** Scores of a painting against its reference (both lab images, same size). */
+function scoresOf( lab, ref, W, H ) {
+	const n = W * H;
+	const dE = deltaE( lab, ref.lab, n );
+	const a2 = down2( lab, W, H );
+	const b2 = down2( ref.lab, W, H );
+	const a4 = down2( a2.lab, a2.W, a2.H );
+	const b4 = down2( b2.lab, b2.W, b2.H );
+	const dE4 = deltaE( a4.lab, b4.lab, a4.W * a4.H );
+	const st = structure( ref.L || lightness( ref.lab, n ), lightness( lab, n ), W, H );
+	return { deltaE: dE, deltaE4: dE4, ssim: st.ssim, edgeCorr: st.edgeCorr };
+}
+
 export class SimilarityEvaluator {
 	constructor( { W, H, lab, importance, refW, refH, refLab } ) {
 		this.W = W;
@@ -166,6 +190,24 @@ export class SimilarityEvaluator {
 		this.dE2 = new Float32Array( this.EW * this.EH );
 		this.dE4 = new Float32Array( this.p4.W * this.p4.H );
 		this.ref = refLab ? { W: refW, H: refH, lab: refLab, L: lightness( refLab, refW * refH ) } : null;
+		this.margin = 0;
+	}
+
+	/**
+	 * Leaves a margin round the sheet out of the scores (a share of its long
+	 * side on every side): Cinematic's clean border is left unpainted on
+	 * purpose and is no part of the likeness. 0 scores the whole sheet. The
+	 * error maps still cover the whole sheet; `evaluate` reports the margin
+	 * (cells) so the painter can leave alone what the scores leave out.
+	 */
+	setMargin( share ) {
+		this.margin = Math.max( 0, Math.min( 0.2, share || 0 ) );
+		this.inner = null;
+		if ( this.margin ) {
+			const m = Math.round( this.margin * Math.max( this.W, this.H ) );
+			const ref = inner( this.lab, this.W, this.H, m );
+			this.inner = { m, ref: { ...ref, L: lightness( ref.lab, ref.W * ref.H ) } };
+		}
 	}
 
 	/**
@@ -242,9 +284,13 @@ export class SimilarityEvaluator {
 			ssim: st.ssim,
 			edgeCorr: st.edgeCorr,
 		};
+		if ( this.inner ) {
+			const r = this.inner.ref;
+			Object.assign( scores, scoresOf( inner( cur, W, H, this.inner.m ).lab, r, r.W, r.H ) );
+		}
 		scores.similarity = combineScore( scores );
 		scores.ms = performance.now() - t0;
-		return { err, de, signed, errU8, EW, EH, scores };
+		return { err, de, signed, errU8, EW, EH, scores, margin: this.inner ? this.inner.m : 0 };
 	}
 
 	/**
@@ -257,9 +303,18 @@ export class SimilarityEvaluator {
 			throw new Error( 'Rendered size does not match reference' );
 		}
 		const n = w * h;
-		const lab = new Float32Array( n * 3 );
+		let lab = new Float32Array( n * 3 );
 		for ( let i = 0; i < n; i++ ) {
 			linearToOklab( SRGB_TO_LINEAR[ rgba[ i * 4 ] ], SRGB_TO_LINEAR[ rgba[ i * 4 + 1 ] ], SRGB_TO_LINEAR[ rgba[ i * 4 + 2 ] ], lab, i * 3 );
+		}
+		if ( this.margin ) {
+			// Only what lies inside Cinematic's border (see setMargin).
+			const m = Math.round( this.margin * Math.max( w, h ) );
+			const a = inner( lab, w, h, m );
+			const b = inner( ref.lab, w, h, m );
+			const scores = { ...scoresOf( a.lab, b, a.W, a.H ), width: w, height: h, margin: m };
+			scores.similarity = combineScore( scores );
+			return scores;
 		}
 		const dE = deltaE( lab, ref.lab, n );
 		const a2 = down2( lab, w, h );

@@ -34,6 +34,7 @@ self.onmessage = ( e ) => {
 					exclude: msg.exclude || [],
 					remap: msg.remap || [],
 					style: msg.style || 'auto',
+					simplify: msg.simplify ?? 1,
 				} );
 				const t1 = performance.now();
 				// The worker keeps its own copies of what layer planning reads; the
@@ -85,13 +86,18 @@ self.onmessage = ( e ) => {
 				break;
 			}
 			case 'planLayer': {
-				const res = planLayer( layerCtx, msg.layer, { cur: new Float32Array( msg.cur ), handX: msg.handX, handY: msg.handY, seed: msg.seed, loaded: msg.loaded, unlimited: msg.unlimited, round: msg.round, region: msg.region, signed: msg.signed ? new Float32Array( msg.signed ) : null, EW: msg.EW, EH: msg.EH } );
+				const res = planLayer( layerCtx, msg.layer, { cur: new Float32Array( msg.cur ), handX: msg.handX, handY: msg.handY, seed: msg.seed, loaded: msg.loaded, unlimited: msg.unlimited, round: msg.round, fresh: msg.fresh, region: msg.region, off: msg.off, signed: msg.signed ? new Float32Array( msg.signed ) : null, de: msg.de ? Float32Array.from( msg.de ) : null, EW: msg.EW, EH: msg.EH } );
 				reply( res, [ res.target.buffer, res.dens.buffer ] );
 				break;
 			}
 			case 'evaluate': {
 				const res = evaluator.evaluate( new Float32Array( msg.D ) );
 				reply( res, [ res.err.buffer, res.de.buffer, res.signed.buffer, res.errU8.buffer ] );
+				break;
+			}
+			case 'setMargin': {
+				evaluator.setMargin( msg.share );
+				reply( {} );
 				break;
 			}
 			case 'evaluateRendered': {

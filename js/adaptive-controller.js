@@ -16,6 +16,10 @@ const LEVELS = [
 ];
 
 const SUBSYSTEMS = [ 'ops', 'sim', 'composite', 'upload', 'render', 'evalCopy' ];
+// At the best level the simulation may take what the rest of a frame leaves,
+// less this margin (the browser's own work, the GPU), up to SIM_MAX ms.
+const FRAME_MARGIN = 4;
+const SIM_MAX = 11;
 
 export class AdaptiveController {
 	constructor() {
@@ -25,6 +29,7 @@ export class AdaptiveController {
 	reset() {
 		this.level = 0;
 		this.dtScale = 1;
+		this.hold = false;
 		this.fps = 0;
 		this.frames = 0;
 		this.secondStart = 0;
@@ -45,6 +50,21 @@ export class AdaptiveController {
 
 	get q() {
 		return LEVELS[ this.level ];
+	}
+
+	/**
+	 * The simulation's share of this frame (ms): its level's budget, or at
+	 * the best level whatever the rest of the frame leaves, so time the frame
+	 * would spend idle goes to painting (a slow device keeps its level's).
+	 */
+	simBudget() {
+		const q = this.q;
+		if ( this.level > 0 ) {
+			return q.simBudget;
+		}
+		const frame = 1000 / Math.max( 60, this.fps || 60 );
+		const rest = this.ema.ops + this.ema.composite + this.ema.upload + this.ema.render + this.ema.evalCopy;
+		return Math.max( q.simBudget, Math.min( SIM_MAX, frame - FRAME_MARGIN - rest ) );
 	}
 
 	record( name, ms ) {
@@ -95,6 +115,10 @@ export class AdaptiveController {
 		} else if ( this.fps >= 58 && work < 13 ) {
 			this.goodSeconds++;
 			this.badSeconds = 0;
+		}
+		if ( this.hold ) {
+			// Lockstep: the quality level stays where it is.
+			return;
 		}
 		if ( this.badSeconds >= 2 && this.level < LEVELS.length - 1 ) {
 			this.level++;

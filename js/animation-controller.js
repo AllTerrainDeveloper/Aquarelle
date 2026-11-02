@@ -20,6 +20,26 @@ const BASE_DT = 1 / 30; // painting seconds per simulation step
 const DRY_FAST = 10;
 // Open-ended modes: the longest pause between two planned gestures.
 const MAX_IDLE = 1.5;
+// Endless: how many rounds in a row may find nothing to do before the
+// painting is finished.
+const EMPTY_RUN = 3;
+// With a similarity goal: how long (real seconds of painting) the score may
+// stay the same, to its first decimal, before that counts as the goal: the
+// painting has gone as far as it will.
+const PLATEAU_SECS = 30 * 60;
+// Lockstep (?lockstep, for benchmarks): every frame this long, whatever
+// the device does.
+const LOCKSTEP_MS = 1000 / 60;
+// Quick draw plays up to this many times faster than its planned pace while
+// the machine has time to spare (see _pace).
+const QUICK_BOOST = 8;
+// Refinement grows stricter every 8 rounds, up to this (see the planner's
+// OFF_ thresholds): small differences are left until the big ones are done.
+const MAX_STRICT = 8;
+// Quick draw refines until this many rounds in a row have not raised the
+// score by SETTLE_GAIN (similarity points).
+const SETTLE_ROUNDS = 12;
+const SETTLE_GAIN = 0.1;
 
 export class AnimationController {
 	constructor( { renderer, adaptive, evaluate, planLayer, onStats, onDone } ) {
@@ -31,6 +51,11 @@ export class AnimationController {
 		this.onDone = onDone;
 		this.state = 'idle';
 		this.speed = 1;
+		// Lockstep: a painting that depends on nothing but its inputs (frames
+		// of a fixed length, no work budgets in milliseconds, the timeline
+		// waiting for every evaluation and layer plan), so two runs agree and
+		// a benchmark measures the painter, not the machine's load.
+		this.lockstep = false;
 		this.setMode( 'paint' );
 		this.last = 0;
 		this._loop = this._loop.bind( this );
@@ -52,11 +77,16 @@ export class AnimationController {
 	reset() {
 		this.model.reset();
 		this.animator.reset();
+		// Retries of a stroke on wet paper are spread out by this, not by
+		// chance, so a painting comes out the same every time.
+		this.jitter = new Rng( 0x5eed );
 		this.splash._washes = null;
 		this.simTime = 0;
 		this.target = 0;
 		this.cursor = 0;
 		this.deferred = [];
+		// The earliest time any of them is due (no need to look before then).
+		this.deferredDue = Infinity;
 		this.ready = [];
 		this.executed = 0;
 		this.skipped = 0;
@@ -79,8 +109,16 @@ export class AnimationController {
 		this.round = 0;
 		this.converged = false;
 		this.reachedTarget = false;
-		this.areas = null;
-		this.lastArea = null;
+		this.emptyRun = 0;
+		this.settleBest = -Infinity;
+		this.settleStall = 0;
+		this.offSheet = null;
+		// Real seconds painted, and since when the score has stood where it
+		// is (to its first decimal).
+		this.paintedReal = 0;
+		this.plateau = null;
+		this.plateaued = false;
+		this.plateauSecs = PLATEAU_SECS;
 		this.waitEval = null;
 		this.evalCount = this.evalCount || 0;
 		this.epoch = ( this.epoch || 0 ) + 1;
@@ -88,6 +126,8 @@ export class AnimationController {
 		this.model.setLayer( null );
 		this.state = 'ready';
 		this.adaptive.reset();
+		this.adaptive.hold = this.lockstep;
+		this.boost = 1;
 		this.renderer.needsDraw = true;
 	}
 
@@ -130,11 +170,12 @@ export class AnimationController {
 	 *   goes to the water jar and the palette between colours (see Director).
 	 * In 'quick' the simulation and every gesture speed up together, so the
 	 * drops, splashes and strokes all still show.
-	 * Endless (quick or realtime): after the layers, keep refining in rounds
-	 * against the paper as it is, each stricter than the last, until rounds
-	 * find nothing left to improve.
+	 * Endless (any mode): after the layers, keep refining in rounds against
+	 * the paper as it is, each stricter than the last, until rounds find
+	 * nothing left to improve. In 'paint' the refining carries on past the
+	 * chosen duration, at the playback speed.
 	 * `target` (similarity, %): with endless, stop as soon as the painting
-	 * scores that much (Cinematic's "until similarity" option).
+	 * scores that much (the "until similarity" option, in every tab).
 	 */
 	setMode( mode, quickSeconds = 20, endless = false, target = 0 ) {
 		this.mode = mode;
@@ -142,8 +183,16 @@ export class AnimationController {
 		this.timelapse = 'quick' === mode ? quickSeconds : 0;
 		// Open-ended: no time budget and no schedule, only the work.
 		this.openEnded = 'paint' !== mode;
-		this.endless = endless && this.openEnded;
+		this.endless = endless;
+		// Quick draw ends by refining too, for as long as it pays off (see
+		// SETTLE_ROUNDS); Endless refines until nothing is left to improve.
+		this.settle = 'quick' === mode && ! endless;
 		this.animator && ( this.animator.cinematic = 'cinematic' === mode );
+	}
+
+	/** Does the painting go on refining after its layers? */
+	get refines() {
+		return this.endless || this.settle;
 	}
 
 	/** At the painter's own pace (Real time and Cinematic). */
@@ -154,7 +203,7 @@ export class AnimationController {
 	/** Painting seconds per real second. */
 	get rate() {
 		if ( 'quick' === this.mode && this.duration ) {
-			return this.duration / this.timelapse;
+			return ( this.duration / this.timelapse ) * ( this.boost || 1 );
 		}
 		if ( this.realtime ) {
 			// Waiting only for paint to dry: fast-forward until there is work.
@@ -163,88 +212,42 @@ export class AnimationController {
 		return this.speed;
 	}
 
+	/** Is (x, y) in the margin the similarity scores leave out? */
+	_inMargin( x, y ) {
+		const m = this.scoreMargin;
+		return m > 0 && ( x < m || y < m || x >= this.model.W - m || y >= this.model.H - m );
+	}
+
 	/**
-	 * Endless: the next area (of a 4x4 grid) to refine, or null when all are
-	 * finished. Worst first by mean error in the latest evaluation, but the
-	 * painter never stays on one area: not the same one twice in a row,
-	 * recent visits lower an area's priority, and an area that three visits
-	 * in a row barely improved is set aside for a while.
+	 * Cells a refinement round leaves alone: the margin the scores leave out
+	 * (null when there is none). It holds Cinematic's border and the band
+	 * just inside it, where each stroke lifts a little nearer or farther
+	 * from the edge: paint there lands by chance and counts for nothing.
 	 */
-	_worstArea() {
-		const G = 4;
-		const { W, H } = this.model;
-		const f = this.errorField;
-		if ( ! this.areas ) {
-			this.areas = [];
-			for ( let row = 0; row < G; row++ ) {
-				for ( let col = 0; col < G; col++ ) {
-					this.areas.push( {
-						col,
-						row,
-						visits: 0,
-						empty: 0,
-						done: false,
-						region: { x0: Math.floor( ( col * W ) / G ), x1: Math.floor( ( ( col + 1 ) * W ) / G ) - 1, y0: Math.floor( ( row * H ) / G ), y1: Math.floor( ( ( row + 1 ) * H ) / G ) - 1 },
-					} );
+	_offSheet() {
+		if ( ! this.scoreMargin ) {
+			return null;
+		}
+		if ( this.offSheet?.m !== this.scoreMargin ) {
+			const { W, H } = this.model;
+			this.offSheet = new Uint8Array( W * H );
+			this.offSheet.m = this.scoreMargin;
+			for ( let y = 0; y < H; y++ ) {
+				for ( let x = 0; x < W; x++ ) {
+					this.offSheet[ y * W + x ] = this._inMargin( x, y ) ? 1 : 0;
 				}
 			}
 		}
-		let best = null;
-		let bestErr = -1;
-		const meanErr = ( a ) => {
-			const bx0 = Math.floor( ( a.col * f.EW ) / G );
-			const bx1 = Math.max( bx0 + 1, Math.floor( ( ( a.col + 1 ) * f.EW ) / G ) );
-			const by0 = Math.floor( ( a.row * f.EH ) / G );
-			const by1 = Math.max( by0 + 1, Math.floor( ( ( a.row + 1 ) * f.EH ) / G ) );
-			let sum = 0;
-			let n = 0;
-			for ( let by = by0; by < by1; by++ ) {
-				for ( let bx = bx0; bx < bx1; bx++ ) {
-					sum += ( f.de || f.err )[ by * f.EW + bx ];
-					n++;
-				}
-			}
-			return n ? sum / n : 0;
-		};
-		// How the last visited area did: barely better three times running
-		// sets it aside for a while.
-		const last = this.lastArea;
-		if ( last && undefined !== last.errBefore ) {
-			const now = meanErr( last );
-			last.stalls = now > last.errBefore * 0.98 ? ( last.stalls || 0 ) + 1 : 0;
-			if ( now > last.errBefore * 1.02 ) {
-				// The visit made it worse: leave it alone for a good while.
-				last.restUntil = this.round + 10;
-				last.stalls = 0;
-			} else if ( last.stalls >= 3 ) {
-				last.restUntil = this.round + 6;
-				last.stalls = 0;
-			}
-		}
-		const open = this.areas.filter( ( a ) => ! a.done );
-		const rested = open.filter( ( a ) => ! ( a.restUntil > this.round ) && a !== last );
-		// If everything else is resting, the last area may go again.
-		const pool = rested.length ? rested : open.filter( ( a ) => a !== last ).length ? open.filter( ( a ) => a !== last ) : open;
-		for ( const a of pool ) {
-			const recent = this.round - ( a.lastRound ?? -99 );
-			const fatigue = 1 + 1.5 * Math.exp( -recent / 3 );
-			const e = meanErr( a ) / fatigue;
-			if ( e > bestErr ) {
-				bestErr = e;
-				best = a;
-			}
-		}
-		if ( best ) {
-			best.errBefore = meanErr( best );
-			best.lastRound = this.round;
-			this.lastArea = best;
-		}
-		return best;
+		return this.offSheet;
 	}
 
 	/** What the header says when a layered painting is done. */
 	_doneLabel() {
 		const sim = this.lastScores ? this.lastScores.similarity.toFixed( 1 ) : '—';
+		if ( this.plateaued ) {
+			const held = this.plateauSecs >= 60 ? `${ Math.round( this.plateauSecs / 60 ) } minutes` : `${ this.plateauSecs } seconds`;
+			return `Finished: ${ sim }% similar, unchanged for ${ held }, so taken as the target (${ this.targetSim }%)`;
+		}
 		if ( this.reachedTarget ) {
 			return `Finished: ${ sim }% similar, target ${ this.targetSim }% reached`;
 		}
@@ -259,7 +262,12 @@ export class AnimationController {
 		this.evalPending = false;
 		this.evalCount = ( this.evalCount || 0 ) + 1;
 		this.lastScores = res.scores;
-		const { err, signed, EW, EH } = res;
+		const shown = res.scores.similarity.toFixed( 1 );
+		if ( ! this.plateau || this.plateau.sim !== shown ) {
+			this.plateau = { sim: shown, since: this.paintedReal };
+		}
+		const { err, de, signed, EW, EH } = res;
+		this.scoreMargin = res.margin || 0;
 		// Damp regions that are still wet: wait for them to settle first.
 		const model = this.model;
 		const W = model.W;
@@ -275,12 +283,14 @@ export class AnimationController {
 				// a border that is slightly off reads better than one reworked.
 				const edgeCalm = 1 - 0.75 * this.an.edge[ i ];
 				// Ignore errors that are already within a perceptual tolerance, and
-				// the border Cinematic leaves unpainted on purpose.
-				const border = this.splash?.border && this.splash.border.room( bx * 2, by * 2 ) < 0;
-				if ( border && signed ) {
+				// the margin the scores leave out (Cinematic's border): its paper
+				// is bare on purpose, so its error would only draw the brush there.
+				const margin = this._inMargin( bx * 2, by * 2 );
+				if ( margin ) {
 					signed[ b ] = 0;
+					de[ b ] = 0;
 				}
-				const e = border ? 0 : Math.max( 0, err[ b ] - 3.5 );
+				const e = margin ? 0 : Math.max( 0, err[ b ] - 3.5 );
 				weight[ b ] = e * e * wetPenalty * edgeCalm;
 				acc += weight[ b ];
 				cdf[ b ] = acc;
@@ -425,9 +435,10 @@ export class AnimationController {
 	_dispatch( op ) {
 		if ( this.openEnded && this.splash.animator ) {
 			this.ready.push( op );
-		} else {
-			this._execute( op );
+			return 0;
 		}
+		this._execute( op );
+		return 1;
 	}
 
 	/**
@@ -475,7 +486,7 @@ export class AnimationController {
 			if ( ! this.errorField ) {
 				// No error map yet: retry shortly.
 				op.t = this.simTime + 2;
-				this.deferred.push( op );
+				this._defer( op );
 				return;
 			}
 			concrete = this._materialize( op );
@@ -495,8 +506,14 @@ export class AnimationController {
 		if ( concrete.defers > 6 ) {
 			concrete.force = true;
 		}
-		concrete.t = this.simTime + this.drying.retryDelay() * ( 1 + Math.random() * 0.5 );
-		this.deferred.push( concrete );
+		concrete.t = this.simTime + this.drying.retryDelay() * ( 1 + this.jitter.float() * 0.5 );
+		this._defer( concrete );
+	}
+
+	/** Holds a mark until its time (op.t). */
+	_defer( op ) {
+		this.deferred.push( op );
+		this.deferredDue = Math.min( this.deferredDue, op.t );
 	}
 
 	/** Plan fine strokes for the gaps that are still bare, over the next window. */
@@ -512,7 +529,7 @@ export class AnimationController {
 		ops.forEach( ( op, n ) => {
 			op.t = this.simTime + 0.5 + ( ( n + 0.5 ) / ops.length ) * window;
 			op.stage = stageAt( op.t / this.duration );
-			this.deferred.push( op );
+			this._defer( op );
 		} );
 		this.gapStrokes += ops.length;
 	}
@@ -528,7 +545,7 @@ export class AnimationController {
 		}
 		let idx = this.layerIdx;
 		const refine = idx >= layers.length;
-		if ( refine && ( ! this.endless || this.converged ) ) {
+		if ( refine && ( ! this.refines || this.converged ) ) {
 			return;
 		}
 		const handFree = this.animator.brushFreeAt - this.animator.clock < 0.5;
@@ -537,11 +554,11 @@ export class AnimationController {
 		if ( ! due || this.deferred.length || this.ready.length || ! handFree ) {
 			return;
 		}
-		// Endless: after the layers, refinement rounds go to the area of the
-		// picture that looks least like the image, judged on a fresh score
-		// taken after the last round, alternating a details pass (lift what is
-		// too dark, dab what is missing) with a fill pass (bare or pale).
-		let area = null;
+		// Endless: after the layers, refinement rounds over the whole picture,
+		// each on a fresh score taken after the last one: the planner finds
+		// every problem, weighs a fix for each, and makes the ones that gain
+		// the most for their time (see refineArea). Mostly against the finish
+		// layer's target, every third round the details layer's.
 		if ( refine ) {
 			if ( null === this.waitEval ) {
 				this.waitEval = this.evalCount + ( this.evalPending ? 1 : 0 );
@@ -557,21 +574,38 @@ export class AnimationController {
 				this.converged = true;
 				return;
 			}
-			area = this._worstArea();
-			if ( ! area ) {
+			// ...and so does a score that has not moved (to its first decimal)
+			// for half an hour: as far as the painting will go.
+			if ( this.targetSim && this.plateau && this.paintedReal - this.plateau.since >= this.plateauSecs ) {
+				this.reachedTarget = true;
+				this.plateaued = true;
 				this.converged = true;
 				return;
 			}
-			// Mostly the fill pass (gaps, pale or too dark, by the error map);
-			// every third visit the details pass.
-			idx = 2 === area.visits % 3 ? 3 : 4;
+			// Quick draw stops refining once a run of rounds has not raised the
+			// score: what is left would take long for little.
+			if ( this.settle ) {
+				const s = this.lastScores ? this.lastScores.similarity : 0;
+				if ( s > this.settleBest + SETTLE_GAIN ) {
+					this.settleBest = s;
+					this.settleStall = 0;
+				} else if ( ++this.settleStall >= SETTLE_ROUNDS ) {
+					this.converged = true;
+					return;
+				}
+			}
+			idx = 2 === this.round % 3 ? 3 : 4;
 		}
 		const L = layers[ idx ];
 		this.layerPending = true;
+		// The masking fluid comes off before the details (see LAYERS).
+		if ( layers.slice( 0, idx + 1 ).some( ( l ) => l.unmask ) ) {
+			this.model.liftMask();
+		}
 		const cur = this.model.snapshotPigment();
 		const epoch = this.epoch = ( this.epoch || 0 ) + 1;
 		// Open-ended modes plan without time limits: they paint everything.
-		this.planLayer( { layer: idx, cur: cur.buffer, handX: this.splash.handX, handY: this.splash.handY, seed: refine ? 100 + this.round : idx, loaded: this.splash.loaded, unlimited: !! this.openEnded, round: area ? area.visits + 1 : 0, region: area ? area.region : null, signed: area ? this.errorField.signed.slice() : null, EW: this.errorField?.EW, EH: this.errorField?.EH }, [ cur.buffer ] ).then( ( res ) => {
+		this.planLayer( { layer: idx, cur: cur.buffer, handX: this.splash.handX, handY: this.splash.handY, seed: refine ? 100 + this.round : idx, loaded: this.splash.loaded, unlimited: !! this.openEnded || refine, round: refine ? Math.min( MAX_STRICT, 1 + Math.floor( this.round / 8 ) ) : 0, fresh: refine && ! this.round, region: refine ? { x0: 0, x1: this.model.W - 1, y0: 0, y1: this.model.H - 1 } : null, off: refine ? this._offSheet() : null, signed: refine ? this.errorField.signed.slice() : null, de: refine ? ( this.errorField.de || this.errorField.err ).slice() : null, EW: this.errorField?.EW, EH: this.errorField?.EH }, [ cur.buffer ] ).then( ( res ) => {
 			if ( epoch !== this.epoch ) {
 				return; // restarted meanwhile
 			}
@@ -581,11 +615,11 @@ export class AnimationController {
 			// left, so later layers are never pushed past the end.
 			const span = res.ops.length ? res.ops[ res.ops.length - 1 ].t : 0;
 			const avail = Math.max( 0.04 * this.duration, L.t1 * this.duration - base );
-			const squeeze = span > avail && ! this.openEnded ? avail / span : 1;
+			const squeeze = span > avail && ! this.openEnded && ! refine ? avail / span : 1;
 			// Open-ended modes never sit idle: a long empty wait between two
 			// gestures (a splash planned late in the layer's time slot) is cut
 			// short. Brushwork queues on the hand anyway.
-			if ( this.openEnded ) {
+			if ( this.openEnded || refine ) {
 				res.ops.sort( ( a, b ) => a.t - b.t );
 				let prev = 0;
 				let shift = 0;
@@ -601,23 +635,28 @@ export class AnimationController {
 			for ( const op of res.ops ) {
 				op.t = base + op.t * squeeze;
 				op.stage = idx;
-				this.deferred.push( op );
+				this._defer( op );
 			}
 			if ( refine ) {
 				this.round++;
-				area.visits++;
-				this.layerName = `Refining the weakest area (${ area.col + 1 }, ${ area.row + 1 }), round ${ this.round }`;
+				this.layerName = `Refining, round ${ this.round }`;
+				// What it found and what it chose for it (e.g. "glaze 2, soften 1").
+				const tools = Object.entries( res.tools || {} ).map( ( [ k, n ] ) => `${ k } ${ n }` ).join( ', ' );
+				if ( tools ) {
+					this.layerName += ` · ${ tools }`;
+				}
 				if ( this.targetSim && this.lastScores ) {
 					this.layerName += ` · ${ this.lastScores.similarity.toFixed( 1 ) }% of ${ this.targetSim }%`;
 				}
-				// An area visited enough whose last two visits found nothing to
-				// do is finished; when all are, the painting has converged.
-				area.empty = res.ops.length ? 0 : area.empty + 1;
-				if ( area.empty >= 2 && area.visits >= 4 ) {
-					area.done = true;
-				}
-				if ( this.areas.every( ( a ) => a.done ) ) {
-					this.converged = true;
+				// When round after round finds nothing worth doing, the painting
+				// is done.
+				if ( res.ops.length ) {
+					this.emptyRun = 0;
+				} else {
+					this.emptyRun++;
+					if ( this.emptyRun >= EMPTY_RUN ) {
+						this.converged = true;
+					}
 				}
 				this.layerPending = false;
 				this.layerOps = ( this.layerOps || 0 ) + res.ops.length;
@@ -636,12 +675,18 @@ export class AnimationController {
 	_simulate( frameStart ) {
 		const q = this.adaptive.q;
 		this._maybeNextLayer();
-		const deadline = frameStart + q.simBudget;
+		const budget = this.adaptive.simBudget();
+		const deadline = this.lockstep ? Infinity : frameStart + budget;
 		const ops = this.plan.ops;
 		const dt = BASE_DT * this.adaptive.dtScale;
 		let opsThisFrame = 0;
 		let opMs = 0;
 		let simMs = 0;
+		let steps = 0;
+		// Quick draw played faster (see _pace) covers more painting time per
+		// frame, and paints as many marks per painting second as at its
+		// planned pace.
+		const maxOps = Math.round( q.maxOps * ( this.boost || 1 ) );
 		while ( this.simTime + dt <= this.target ) {
 			const ta = performance.now();
 			if ( ta > deadline ) {
@@ -650,26 +695,37 @@ export class AnimationController {
 			// Due ops first (planned order), then deferred ones.
 			// Backpressure: with too many gestures in flight, let the timeline wait.
 			const saturated = this.animator.actions.length > q.maxGestures;
-			while ( ! saturated && this.cursor < ops.length && ops[ this.cursor ].t <= this.simTime && opsThisFrame < q.maxOps ) {
-				this._dispatch( ops[ this.cursor++ ] );
-				opsThisFrame++;
+			// Only marks painted now count against the frame's budget: one handed
+			// to the painter's pool (open-ended modes) is not painted yet, and
+			// counting it let a long run of due marks fill every frame's budget
+			// while the pool, never given a turn, painted nothing.
+			while ( ! saturated && this.cursor < ops.length && ops[ this.cursor ].t <= this.simTime && opsThisFrame < maxOps ) {
+				opsThisFrame += this._dispatch( ops[ this.cursor++ ] );
 			}
-			if ( this.deferred.length && opsThisFrame < q.maxOps ) {
+			if ( this.deferredDue <= this.simTime && opsThisFrame < maxOps ) {
 				const due = [];
-				this.deferred = this.deferred.filter( ( o ) => ( o.t <= this.simTime ? ( due.push( o ), false ) : true ) );
+				let next = Infinity;
+				this.deferred = this.deferred.filter( ( o ) => {
+					if ( o.t <= this.simTime ) {
+						due.push( o );
+						return false;
+					}
+					next = Math.min( next, o.t );
+					return true;
+				} );
+				this.deferredDue = next;
 				for ( const o of due ) {
-					if ( opsThisFrame >= q.maxOps ) {
-						this.deferred.push( o );
+					if ( opsThisFrame >= maxOps ) {
+						this._defer( o );
 						continue;
 					}
-					this._dispatch( o );
-					opsThisFrame++;
+					opsThisFrame += this._dispatch( o );
 				}
 			}
-			opsThisFrame += this._paintFromPool( q.maxOps - opsThisFrame );
+			opsThisFrame += this._paintFromPool( maxOps - opsThisFrame );
 			const tb = performance.now();
 			opMs += tb - ta;
-			if ( this.cursor < ops.length && ops[ this.cursor ].t <= this.simTime && ( saturated || opsThisFrame >= q.maxOps ) ) {
+			if ( this.cursor < ops.length && ops[ this.cursor ].t <= this.simTime && ( saturated || opsThisFrame >= maxOps ) ) {
 				// Ops are queued up; let the next frame continue instead of racing ahead.
 				break;
 			}
@@ -677,20 +733,75 @@ export class AnimationController {
 			this.model.step( dt, this.drying.evapScale( progress, this.finishing ) );
 			this.simTime += dt;
 			simMs += performance.now() - tb;
+			steps++;
+		}
+		if ( steps ) {
+			// What a step costs now (fast-forwarding takes no more than fits).
+			this.stepMs = 0.8 * ( this.stepMs || simMs / steps ) + 0.2 * ( simMs / steps );
 		}
 		// Gestures advance once per frame: their deposits are progressive anyway.
 		const tg = performance.now();
-		this.animator.update( this.animator.clock, this.adaptive.q.gestureBudget );
+		this.animator.update( this.animator.clock, this.lockstep ? Infinity : this.adaptive.q.gestureBudget );
 		opMs += performance.now() - tg;
 		this.adaptive.record( 'ops', opMs );
 		this.adaptive.record( 'sim', simMs );
 		const lag = this.target - this.simTime;
 		const rate = Math.max( 1, this.rate );
-		this.adaptive.reportLag( lag / rate );
+		this._pace( lag, dt, simMs + opMs, budget );
+		// Coarser steps only when even the planned pace cannot keep up (while
+		// faster than planned, they only go back to normal).
+		this.adaptive.reportLag( ( this.boost || 1 ) > 1 ? 0 : lag / rate );
 		// Never accumulate unbounded debt on slow devices.
 		if ( lag > 3 * rate ) {
 			this.target = this.simTime + 3 * rate;
 		}
+	}
+
+	/**
+	 * Quick draw goes as fast as the machine allows at full accuracy: the
+	 * whole painting (simulation, hand and all) plays faster while the
+	 * frame's work leaves half its budget spare, and slower as soon as the
+	 * simulation falls behind, never below the planned pace. The painting is
+	 * the same; only less time passes watching it. (Lockstep keeps the
+	 * planned pace.)
+	 */
+	_pace( lag, dt, workMs, budget ) {
+		if ( 'quick' !== this.mode || this.lockstep ) {
+			this.boost = 1;
+			return;
+		}
+		if ( lag > 4 * dt ) {
+			this.boost = Math.max( 1, this.boost * 0.85 );
+		} else if ( workMs < 0.5 * budget ) {
+			this.boost = Math.min( QUICK_BOOST, this.boost * 1.05 );
+		}
+	}
+
+	/**
+	 * Quick draw: painting time with nothing to do, the hand free and nothing
+	 * being planned (the next mark not due yet, or the sheet drying at the
+	 * end), goes by up to DRY_FAST times faster, as a drying wait does in
+	 * Real time. The simulation still runs every step of it, at its usual
+	 * step size: only once it has caught up, and no more steps than fit in
+	 * the frame's budget. Returns the extra painting time.
+	 */
+	_fastForward( dtPaint ) {
+		if ( 'quick' !== this.mode || this.animator.working || this.layerPending || this.ready.length || this.target - this.simTime > BASE_DT ) {
+			return 0;
+		}
+		const ops = this.plan.ops;
+		const next = Math.min( this.deferredDue, this.cursor < ops.length ? ops[ this.cursor ].t : Infinity );
+		// Only up to a mark that is due later, or through the final drying:
+		// between layers the paper would dry longer before the next is planned.
+		if ( next === Infinity && ! this.finishing ) {
+			return 0;
+		}
+		const dt = BASE_DT * this.adaptive.dtScale;
+		let most = dtPaint * ( DRY_FAST - 1 );
+		if ( ! this.lockstep && this.stepMs ) {
+			most = Math.min( most, Math.max( 0, Math.floor( ( 0.8 * this.adaptive.simBudget() ) / this.stepMs ) * dt - dtPaint ) );
+		}
+		return Math.max( 0, Math.min( most, next - this.target - dtPaint ) );
 	}
 
 	_maybeEvaluate( now ) {
@@ -707,9 +818,11 @@ export class AnimationController {
 
 	_loop( now ) {
 		requestAnimationFrame( this._loop );
-		const dtMs = this.last ? Math.min( 250, now - this.last ) : 16.7;
+		const dtMs = this.lockstep ? LOCKSTEP_MS : this.last ? Math.min( 250, now - this.last ) : 16.7;
 		this.last = now;
-		const painting = 'painting' === this.state;
+		// In lockstep the painting holds still while the worker evaluates or
+		// plans: what it sends back lands on the same frame every time.
+		const painting = 'painting' === this.state && ! ( this.lockstep && ( this.evalPending || this.layerPending ) );
 		this.adaptive.frame( now, dtMs, painting );
 		if ( ! this.model ) {
 			return;
@@ -717,6 +830,7 @@ export class AnimationController {
 		const frameStart = performance.now();
 		if ( painting ) {
 			const dtReal = Math.min( dtMs, 100 ) / 1000;
+			this.paintedReal += dtReal;
 			// Nothing in the painter's hands and nothing being planned, only
 			// strokes waiting for wet paint (or the final drying): in Real time
 			// that wait is fast-forwarded.
@@ -731,18 +845,23 @@ export class AnimationController {
 			const dtPaint = handBusy || this.layerPending ? 0 : dtReal * rate;
 			// Open-ended modes have no end time: they end when the work is done.
 			const atEnd = this.openEnded || this.simTime >= this.duration - BASE_DT * this.adaptive.dtScale;
-			const layersDone = ! this.plan.layers || ( this.layerIdx >= this.plan.layers.length && ! this.layerPending && ( ! this.endless || this.converged ) );
+			const layersDone = ! this.plan.layers || ( this.layerIdx >= this.plan.layers.length && ! this.layerPending && ( ! this.refines || this.converged ) );
 			const planDone = this.cursor >= this.plan.ops.length && 0 === this.deferred.length && 0 === this.ready.length && ! this.animator.busy && layersDone;
 			if ( atEnd && planDone ) {
 				this.finishing = true;
 			}
 			// Past the end, keep going only to flush queued ops and dry the sheet.
 			const cap = atEnd ? Infinity : this.duration;
-			this.target = Math.min( cap, this.target + dtPaint );
+			this.target = Math.min( cap, this.target + dtPaint + this._fastForward( dtPaint ) );
 			this._simulate( frameStart );
-			this._maybeEvaluate( now );
+			this._maybeEvaluate( this.lockstep ? this.paintedReal * 1000 : now );
 			if ( this.finishing && 0 === this.model.activeTiles ) {
 				this.state = 'done';
+				// A goal met (either way): Cinematic's camera steps back to the
+				// whole painting.
+				if ( this.reachedTarget && this.director?.active ) {
+					this.director.showWhole();
+				}
 				this.onDone?.();
 			}
 		}
@@ -777,7 +896,7 @@ export class AnimationController {
 			const n = this.plan.layers.length;
 			const frac = this.layerCount ? Math.min( 1, ( this.executed - ( this.layerExec0 || 0 ) ) / this.layerCount ) : 0;
 			u = Math.min( 1, ( Math.max( 0, this.layerIdx - 1 ) + frac ) / n );
-			if ( this.endless ) {
+			if ( this.refines ) {
 				// Layers fill most of the bar; refinement creeps toward the end.
 				u = this.round ? 0.8 + 0.2 * ( 1 - Math.exp( -this.round / 5 ) ) : u * 0.8;
 			}
