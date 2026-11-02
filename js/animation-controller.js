@@ -18,6 +18,10 @@ const BASE_DT = 1 / 30; // painting seconds per simulation step
 // Real time: how much faster the clock runs while the painter only waits
 // for paint to dry.
 const DRY_FAST = 10;
+// Cinematic plays the painter a little brisker than life, every motion alike
+// (the brush, its trips to the jar and the palette, the paint): faster than
+// this and the short ones, the rinse and the loading, start to look hurried.
+const CINEMATIC_PACE = 1.2;
 // Open-ended modes: the longest pause between two planned gestures.
 const MAX_IDLE = 1.5;
 // Endless: how many rounds in a row may find nothing to do before the
@@ -200,6 +204,11 @@ export class AnimationController {
 		return 'realtime' === this.mode || 'cinematic' === this.mode;
 	}
 
+	/** How much faster than life the painter's own pace plays. */
+	get pace() {
+		return 'cinematic' === this.mode ? CINEMATIC_PACE : 1;
+	}
+
 	/** Painting seconds per real second. */
 	get rate() {
 		if ( 'quick' === this.mode && this.duration ) {
@@ -207,7 +216,7 @@ export class AnimationController {
 		}
 		if ( this.realtime ) {
 			// Waiting only for paint to dry: fast-forward until there is work.
-			return this.dryingWait ? DRY_FAST : 1;
+			return this.dryingWait ? DRY_FAST : this.pace;
 		}
 		return this.speed;
 	}
@@ -835,9 +844,10 @@ export class AnimationController {
 			// strokes waiting for wet paint (or the final drying): in Real time
 			// that wait is fast-forwarded.
 			this.dryingWait = this.realtime && ! this.animator.busy && ! this.layerPending && ( this.finishing || this.deferred.some( ( o ) => o.defers > 0 ) );
-			// In a time-lapse the gestures speed up with everything else.
+			// In a time-lapse the gestures speed up with everything else (and
+			// in Cinematic, with its pace).
 			const rate = this.rate;
-			const lapse = 'quick' === this.mode ? rate : 1;
+			const lapse = 'quick' === this.mode ? rate : this.pace;
 			this.animator.tick( dtReal * lapse );
 			// The hand never hurries: while brushwork is backed up, the timeline
 			// waits; it also waits while the painter steps back to plan a layer.
@@ -877,7 +887,7 @@ export class AnimationController {
 		}
 		if ( this.director && this.director.active ) {
 			// Cinematic: the camera, the desk and the brush.
-			this.director.frame( dtMs / 1000, this.animator.clock );
+			this.director.frame( dtMs / 1000, this.animator.clock, this.pace );
 		} else if ( this.overlay ) {
 			const c = this.overlay.canvas;
 			this.animator.draw( this.overlay, this.animator.clock, c.width / this.model.W, c.height / this.model.H, c.width / ( c.clientWidth || c.width ) );

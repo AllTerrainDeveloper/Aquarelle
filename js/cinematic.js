@@ -492,7 +492,10 @@ export class Director {
 				this.color = mixRgb( this.color, this._paint( T ), 1 - Math.exp( -dt * 6 ) );
 				this.load = Math.min( 1, this.load + dt * 2 );
 			}
-		} else if ( T.stroke ) {
+		} else if ( T.stroke && h.lift < 0.2 ) {
+			// Only on the paper: a stroke's mix can differ from the last one's
+			// without a trip to the palette, and a brush in the air has nothing
+			// to take a new colour from. Its tip picks it up as it lays it.
 			if ( T.k >= 0 && ! T.lifting ) {
 				this.color = mixRgb( this.color, this._paint( T ), 1 - Math.exp( -dt * 8 ) );
 			} else if ( T.k < 0 ) {
@@ -500,9 +503,7 @@ export class Director {
 				this.color = mixRgb( this.color, CLEAN, 1 - Math.exp( -dt * 8 ) );
 			}
 			// The brush gives up its paint as it goes.
-			if ( h.lift < 0.2 ) {
-				this.load = Math.max( 0.15, this.load - dt / 9 );
-			}
+			this.load = Math.max( 0.15, this.load - dt / 9 );
 		}
 		this._flowJar( dt );
 	}
@@ -753,14 +754,16 @@ export class Director {
 
 	/* Drawing --------------------------------------------------------------------- */
 
-	frame( dt, t ) {
+	frame( dt, t, pace = 1 ) {
 		if ( ! this.layout ) {
 			return;
 		}
 		dt = Math.min( 0.1, Math.max( 0, dt ) );
 		this.time += dt;
-		this.lastDt = dt;
-		this._moveHand( dt, t );
+		// The hand (its hairs, and the water and paint it carries) keeps the
+		// brush's pace; the camera keeps real time.
+		this.lastDt = dt * pace;
+		this._moveHand( this.lastDt, t );
 		this._moveCamera( dt, t );
 		const ctx = this.ctx;
 		const cv = this.overlay;

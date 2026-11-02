@@ -37,7 +37,9 @@ tabs, then press **Paint** (it also pauses and resumes):
   faster and the header shows "Drying ×10".
 - **Custom**: fits the painting into the *time to spend* you choose, at the
   playback speed you choose.
-- **Cinematic**: Real time, filmed. The sheet lies on a desk beside a water
+- **Cinematic**: Real time, filmed, played a fifth faster than life (the
+  painting, the brush and its trips alike; the camera keeps real time). The
+  sheet lies on a desk beside a water
   jar and a palette with a well per colour. The camera follows the brush,
   moving in close for fine marks and pulling back for washes and while paint
   dries. Between colours, and whenever it runs dry, the brush goes to the
@@ -203,7 +205,8 @@ paintings worse). Shapes still follow the picture's own colours, so the
 light and the dark of one paint stay separate areas. Each area may mix two
 paints (a photo's, up to three), and **the brush mixes them on the
 palette**: a stroke whose cells call for a second paint carries both, in
-the ratio they need (and Cinematic's brush shows the mix). Laid one after
+the ratio they need (and Cinematic's brush shows the mix, taking it up
+only where it touches paint: at a well or on the paper, never in the air). Laid one after
 the other, the first would take the cell's darkness and the second could
 not follow, a dark brown left red. Detection uses the share of pixels with fine,
 non-edge texture (photos ≈0.25–0.3, flat artwork < 0.08). A higher Detail
